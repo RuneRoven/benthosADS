@@ -1,0 +1,6 @@
+github.com/benthosdev/benthos/v4 v4.24.0 h1:AMVhM1Uo8qjXppmTXEdoMjIrpl2WUsgWbNxOIQ9wXK4=
+github.com/benthosdev/benthos/v4 v4.24.0/go.mod h1:wSp6eT+O03JTZUFeXgLrWplIiYrxu0h47/s4PRUeerI=
+github.com/cihub/seelog v0.0.0-20170130134532-f561c5e57575 h1:kHaBemcxl8o/pQ5VM1c8PVE1PubbNx3mjUr09OqWGCs=
+github.com/cihub/seelog v0.0.0-20170130134532-f561c5e57575/go.mod h1:9d6lWj8KzO/fd/NrVaLscBKmPigpZpn5YawRPw+e3Yo=
+github.com/stamp/goADS v0.0.0-20211110084739-f0e7b1091d64 h1:74oxQeghsV7/Gd+sz51Ug00uZLJUdhhAnYnfmdZDZm4=
+github.com/stamp/goADS v0.0.0-20211110084739-f0e7b1091d64/go.mod h1:zsfdGqvytvukUzHKEnmLvzP0nX9S/duoC3mvknAAziU=
