@@ -2,8 +2,9 @@ package adsPlugin
 
 import (
 	"context"
+	"fmt"
 	"github.com/benthosdev/benthos/v4/public/service"
-
+	"github.com/stamp/goADS"
 )
 
 type adsDataItems struct {
@@ -24,9 +25,9 @@ type adsCommInput struct {
 	cycleTime	int										// Read interval time if read type interval, cycle time if read type notification in milliseconds
 	maxDelay	int										// Max delay time after value change before PLC should send message, in milliseconds
 	timeout     time.Duration                        	// Time duration before a connection attempt or read request times out.
-	handler     *connection								// TCP handler to manage the connection.
+	handler     *goADS.connection						// TCP handler to manage the connection.
 	log         *service.Logger                       	// Logger for logging plugin activity.
-	symbols     [][]adsDataItems 						// List of items to read from the PLC, grouped into batches with a maximum size.
+	symbols     []string 								// List of items to read from the PLC, grouped into batches with a maximum size.
 }
 
 
@@ -42,7 +43,94 @@ var adsConf = service.NewConfigSpec().
 	Field(service.NewIntField("cycleTime").Description("Read interval time if read type interval, cycle time if read type notification in milliseconds.").Default(1000)).
 	Field(service.NewIntField("maxDelay").Description("Max delay time after value change before PLC should send message, in milliseconds. Default 100").Default(100)).
 	Field(service.NewIntField("timeout").Description("The timeout duration in seconds for connection attempts and read requests.").Default(10)).
-	Field(service.NewStringListField("symbols").Description("List of symbols and data type for each to read in the format 'function.name,int32', e.g., 'MAIN.counter,int32', '.globalCounter,int64' "))
+	Field(service.NewStringListField("symbols").Description("List of symbols to read in the format 'function.name', e.g., 'MAIN.counter', '.globalCounter' "))
+	//Field(service.NewStringListField("symbols").Description("List of symbols and data type for each to read in the format 'function.name,int32', e.g., 'MAIN.counter,int32', '.globalCounter,int64' "))
 
 
+	func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) {
+		targetIP, err := conf.FieldString("targetIP")
+		if err != nil {
+			return nil, err
+		}
+	
+		targetAMS, err := conf.FieldString("targetAMS")
+		if err != nil {
+			return nil, err
+		}
+	
+		port, err := conf.FieldInt("port")
+		if err != nil {
+			return nil, err
+		}
+
+		hostAMS, err := conf.FieldString("hostAMS")
+		if err != nil {
+			return nil, err
+		}
+
+		readType, err := conf.FieldString("readType")
+		if err != nil {
+			return nil, err
+		}
+
+		cycleTime, err := conf.FieldInt("cycleTime")
+		if err != nil {
+			return nil, err
+		}
+		maxDelay, err := conf.FieldInt("maxDelay")
+		if err != nil {
+			return nil, err
+		}
+		
+		symbols, err := conf.FieldStringList("symbols")
+		if err != nil {
+			return nil, err
+		}
+	
+		timeoutInt, err := conf.FieldInt("timeout")
+		if err != nil {
+			return nil, err
+		}
+	
+		//for _, value := range slice {
+		//	fmt.Printf("Value: %s\n", value)
+		//}
+
+		m := &S7CommInput{
+			tcpDevice:    tcpDevice,
+			rack:         rack,
+			slot:         slot,
+			log:          mgr.Logger(),
+			batches:      batches,
+			batchMaxSize: batchMaxSize,
+			timeout:      time.Duration(timeoutInt) * time.Second,
+		}
+	
+		return err, nil
+	}
+HÄRÄ ÄR JAG OCH SKA SKRIVA MERA
+	func (g *adsCommInput) Connect(ctx context.Context) error { 
+		g.handler = gos7.NewTCPClientHandler(g.tcpDevice, g.rack, g.slot)
+		g.handler.Timeout = g.timeout
+		g.handler.IdleTimeout = g.timeout
+	
+		err := g.handler.Connect()
+		if err != nil {
+			g.log.Errorf("Failed to connect to S7 PLC at %s: %v", g.tcpDevice, err)
+			return err
+		}
+	
+		g.client = gos7.NewClient(g.handler)
+		g.log.Infof("Successfully connected to S7 PLC at %s", g.tcpDevice)
+	
+		cpuInfo, err := g.client.GetCPUInfo()
+		if err != nil {
+			g.log.Errorf("Failed to get CPU information: %v", err)
+		} else {
+			g.log.Infof("CPU Information: %s", cpuInfo)
+		}
+	
+		return nil
+	}
+	
 defer log.Flush()
