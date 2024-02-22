@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/benthosdev/benthos/v4/public/service"
-	"github.com/stamp/goADS"
+	"gitlab.com/xilix-systems-llc/go-native-ads/v4" ads
 )
 
 type adsDataItems struct {
@@ -17,17 +17,20 @@ type adsDataItems struct {
 // It holds the configuration necessary to establish a connection with a Beckhoff PLC,
 // along with the read requests to fetch data from the PLC.
 type adsCommInput struct {
-	targetIP    string                                	// IP address of the PLC.
-	targetAMS   string                                	// Target AMS net ID.
-	port        int                                   	// Target port. Default 801(Twincat 2)
-	hostAMS 	string                                  // The host AMS net ID, auto (default) automatically derives AMS from host IP. Enter manually if auto not working
-	readType 	string									// Read type, interval or notification
-	cycleTime	int										// Read interval time if read type interval, cycle time if read type notification in milliseconds
-	maxDelay	int										// Max delay time after value change before PLC should send message, in milliseconds
-	timeout     time.Duration                        	// Time duration before a connection attempt or read request times out.
-	handler     *goADS.connection						// TCP handler to manage the connection.
-	log         *service.Logger                       	// Logger for logging plugin activity.
-	symbols     []string 								// List of items to read from the PLC, grouped into batches with a maximum size.
+	targetIP    	string                                	// IP address of the PLC.
+	targetAMS   	string                                	// Target AMS net ID.
+	port        	int                                   	// Target port. Default 801(Twincat 2)
+	hostAMS 		string                                  // The host AMS net ID, auto (default) automatically derives AMS from host IP. Enter manually if auto not working
+	readType 		string									// Read type, interval or notification
+	cycleTime		int										// Read interval time if read type interval, cycle time if read type notification in milliseconds
+	maxDelay		int										// Max delay time after value change before PLC should send message, in milliseconds
+	timeout     	time.Duration                        	// Time duration before a connection attempt or read request times out.
+	handler     	*goADS.connection						// TCP handler to manage the connection.
+	log         	*service.Logger                       	// Logger for logging plugin activity.
+	symbols     	[]string 								// List of items to read from the PLC, grouped into batches with a maximum size.
+	deviceInfo 		DeviceInfo								// PLC device info 
+	deviceSymbols	ADSSymbol								// Received symbols from PLC
+	notificationChan chan *ads.Update
 }
 
 
@@ -47,7 +50,7 @@ var adsConf = service.NewConfigSpec().
 	//Field(service.NewStringListField("symbols").Description("List of symbols and data type for each to read in the format 'function.name,int32', e.g., 'MAIN.counter,int32', '.globalCounter,int64' "))
 
 
-	func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) {
+	func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
 		targetIP, err := conf.FieldString("targetIP")
 		if err != nil {
 			return nil, err
@@ -96,41 +99,100 @@ var adsConf = service.NewConfigSpec().
 		//	fmt.Printf("Value: %s\n", value)
 		//}
 
-		m := &S7CommInput{
-			tcpDevice:    tcpDevice,
-			rack:         rack,
-			slot:         slot,
-			log:          mgr.Logger(),
-			batches:      batches,
-			batchMaxSize: batchMaxSize,
-			timeout:      time.Duration(timeoutInt) * time.Second,
+		m := &adsCommInput{
+			targetIP:   	targetIP,
+			targetAMS:  	targetAMS,
+			port:       	port,
+			hostAMS:		hostAMS,
+			readType: 		readType,
+			cycleTime:		cycleTime,
+			maxDelay:		maxDelay,
+			symbols:		symbols,
+			log:          	mgr.Logger(),
+			timeout:      	time.Duration(timeoutInt) * time.Second,
 		}
 	
-		return err, nil
+		return service.AutoRetryNacks(&m), nil
 	}
-HÄRÄ ÄR JAG OCH SKA SKRIVA MERA
-	func (g *adsCommInput) Connect(ctx context.Context) error { 
-		g.handler = gos7.NewTCPClientHandler(g.tcpDevice, g.rack, g.slot)
-		g.handler.Timeout = g.timeout
-		g.handler.IdleTimeout = g.timeout
-	
-		err := g.handler.Connect()
+
+	func init() {
+		err := service.RegisterBatchInput(
+			"adsComm", adsConf,
+			func(conf *service.ParsedConfig, mgr *service.Resources) (service.AckFunc, error) {
+				return newAdsCommInput(conf, mgr)
+			})
 		if err != nil {
-			g.log.Errorf("Failed to connect to S7 PLC at %s: %v", g.tcpDevice, err)
+			panic(err)
+		}
+	}
+
+	func (g *adsCommInput) Connect(ctx context.Context) error { 
+		ctx, cancel := context.WithCancel(context.Background())
+		g.handler, e := goADS.NewConnection(ctx g.targetIP, 48898, g.targetAMS, g.port, g.hostAMS, 10500)
+		//g.handler.Timeout = g.timeout
+		//g.handler.IdleTimeout = g.timeout
+	
+		err := g.handler.Connect(false)
+		if err != nil {
+			g.log.Errorf("Failed to connect to  PLC at %s: %v", g.targetIP, err)
 			return err
 		}
+		defer g.handler.Close() // Close the connection when we are done
+
+		g.DeviceInfo, e := g.handler.ReadDeviceInfo()
+		if e != nil {
+			log.Critical(e)
+			os.Exit(1)
+		}
+		log.Infof("Successfully conncected to \"%s\" version %d.%d (build %d)", g.DeviceInfo.DeviceName, g.DeviceInfo.MajorVersion, g.DeviceInfo.MinorVersion, g.DeviceInfo.BuildVersion) /*}}}*/
+
+		//g.deviceSymbols, _ := g.handler.GetSymbol()
+		//g.handler.AddSymbolNotification("MAIN.I", update)
+		for _, symbolName := range g.symbols {
+			g.handler.AddSymbolNotification(symbolName, update)
+		}
+		/*
+		for _, symbolName := range g.symbols {
+			currentSymbol, ok := g.deviceSymbols[symbolName]
+			if !ok {
+				// Print an error if the symbol is missing
+				fmt.Printf("Error: Symbol %s not found\n", symbolName)
+				continue
+			}
 	
-		g.client = gos7.NewClient(g.handler)
-		g.log.Infof("Successfully connected to S7 PLC at %s", g.tcpDevice)
-	
-		cpuInfo, err := g.client.GetCPUInfo()
-		if err != nil {
-			g.log.Errorf("Failed to get CPU information: %v", err)
-		} else {
-			g.log.Infof("CPU Information: %s", cpuInfo)
+			// Add device notification and set value based on your logic
+			currentSymbol.AddDeviceNotification(func(currentSymbol *goADS.ADSSymbol) {
+				val := g.handler.Value(symbolName)
+				if val == "True" {
+					connection.Set(symbolName, "1")
+				} else {
+					connection.Set(symbolName, "0")
+				}
+				currentSymbol.Walk()
+			})
+		}
+		*/
+		g.notificationChan = make(chan *ads.Update)
+		
+
+		return nil
+	}
+	func (g *adsCommInput) adsResponse(ctx context.Context) (service.Message, service.AckFunc, error) {
+		var res *adsCommInput.notificationChan	
+		msgs := service.Message{}
+		msgs = append(msgs, message)
+		return msgs, func(ctx context.Context, err error) error {
+		// Nacks are retried automatically when we use service.AutoRetryNacks
+			return nil
+		}, nil
+	}
+
+	func (g *adsCommInput) Close(ctx context.Context) error {
+		if g.handler != nil {
+			g.handler.Close()
+			g.handler = nil
+			
 		}
 	
 		return nil
 	}
-	
-defer log.Flush()
