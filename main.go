@@ -6,7 +6,7 @@ import (
 
 	// Import all standard Benthos components
 	_ "github.com/benthosdev/benthos/v4/public/components/all"
-	_ "/ads"
+	_ "benthosADS/ads"
 
 
 )

@@ -4,14 +4,9 @@ import (
 	"context"
 	"fmt"
 	"github.com/benthosdev/benthos/v4/public/service"
-	"gitlab.com/xilix-systems-llc/go-native-ads/v4" ads
+	ads "gitlab.com/xilix-systems-llc/go-native-ads/v4" 
 )
 
-type adsDataItems struct {
-	symbolName      string
-	dataType 		converterFunc
-	Item       		gos7.S7DataItem
-}
 
 // ads communication struct defines the structure for our custom Benthos input plugin.
 // It holds the configuration necessary to establish a connection with a Beckhoff PLC,
@@ -128,7 +123,7 @@ var adsConf = service.NewConfigSpec().
 
 	func (g *adsCommInput) Connect(ctx context.Context) error { 
 		ctx, cancel := context.WithCancel(context.Background())
-		g.handler, e := goADS.NewConnection(ctx g.targetIP, 48898, g.targetAMS, g.port, g.hostAMS, 10500)
+		g.handler, e := goADS.NewConnection(ctx, g.targetIP, 48898, g.targetAMS, g.port, g.hostAMS, 10500)
 		//g.handler.Timeout = g.timeout
 		//g.handler.IdleTimeout = g.timeout
 	
