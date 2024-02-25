@@ -4,7 +4,10 @@ go 1.21.6
 
 replace benthosADS/ads => ./ads
 
-require github.com/benthosdev/benthos/v4 v4.24.0
+require (
+	github.com/benthosdev/benthos/v4 v4.24.0
+	gitlab.com/xilix-systems-llc/go-native-ads/v4 v4.0.8
+)
 
 require (
 	cloud.google.com/go v0.110.8 // indirect
@@ -249,7 +252,6 @@ require (
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20201027041543-1326539a0a0a // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
-	gitlab.com/xilix-systems-llc/go-native-ads/v4 v4.0.8 // indirect
 	go.etcd.io/bbolt v1.3.8 // indirect
 	go.mongodb.org/mongo-driver v1.13.0 // indirect
 	go.nanomsg.org/mangos/v3 v3.4.2 // indirect
