@@ -1,0 +1,27 @@
+---
+input:
+  adsinput:
+    targetIP: '192.168.3.70' # IP address 
+    targetAMS: '5.3.69.134.1.1'                  
+    port: 801                  
+    hostAMS: '192.168.56.1.1.1'         
+    readType: 'notification'             
+    cycleTime: 10
+    maxDelay: 0
+    timeout: 10
+    symbols:               # List of addresses to read from
+      - "MAIN.speedos"     # Accesses a
+
+
+pipeline:
+  processors:
+    - mapping: |
+        root.message = this
+
+output:
+  stdout: {}
+
+logger:
+  level: ALL
+  format: logfmt
+  add_timestamp: true

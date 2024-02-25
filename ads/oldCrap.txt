@@ -1,0 +1,83 @@
+func (g *adsCommInput) Connect(ctx context.Context) error { 
+	/*
+	wg := sync.WaitGroup{}
+	g.handler, _ = adsLib.NewConnection(ctx, g.targetIP, 48898, g.targetAMS, g.port, g.hostAMS, 10500)
+	//g.handler.Timeout = g.timeout
+	//g.handler.IdleTimeout = g.timeout
+	wg.Wait()
+	err := g.handler.Connect(false)
+	if err != nil {
+		g.log.Errorf("Failed to connect to  PLC at %s: %v", g.targetIP, err)
+		return err
+	}
+	
+	defer g.handler.Close() // Close the connection when we are done
+	*/
+	  // Create a new connection asynchronously
+  // Create a new connection asynchronously
+    // Create a new context with a cancellation function
+      // Create a new context with a cancellation function
+
+	// Create a new connection
+	var err error
+	g.handler, err = adsLib.NewConnection(ctx, g.targetIP, 48898, g.targetAMS, g.port, g.hostAMS, 10500)
+	if err != nil {
+		g.log.Errorf("Failed to create connection: %v", err)
+		return err
+	}
+
+	// Check if the context is canceled before connecting
+	select {
+	case <-ctx.Done():
+		g.log.Errorf("Connection operation canceled due to context deadline exceeded")
+		return ctx.Err()
+	default:
+		// Continue with the connection attempt
+	}
+
+	// Connect to the PLC
+	err = g.handler.Connect(false)
+	if err != nil {
+		g.log.Errorf("Failed to connect to PLC at %s: %v", g.targetIP, err)
+		return err
+	}
+
+	// The connection is closed when this function returns, no need for deferred Close
+	var errs error
+	g.deviceInfo, errs = g.handler.ReadDeviceInfo()
+	if errs != nil {
+		return errs
+	}
+	g.log.Infof("Successfully connected to \"%s\" version %d.%d (build %d)", g.deviceInfo.DeviceName, g.deviceInfo.Major, g.deviceInfo.Minor, g.deviceInfo.Version)
+  
+	//g.deviceSymbols, _ := g.handler.GetSymbol()
+	//g.handler.AddSymbolNotification("MAIN.I", update)
+	for _, symbolName := range g.symbols {
+		g.handler.AddSymbolNotification(symbolName, g.notificationChan)
+	}
+	/*
+	for _, symbolName := range g.symbols {
+		currentSymbol, ok := g.deviceSymbols[symbolName]
+		if !ok {
+			// Print an error if the symbol is missing
+			fmt.Printf("Error: Symbol %s not found\n", symbolName)
+			continue
+		}
+
+		// Add device notification and set value based on your logic
+		currentSymbol.AddDeviceNotification(func(currentSymbol *goadsLib.ADSSymbol) {
+			val := g.handler.Value(symbolName)
+			if val == "True" {
+				connection.Set(symbolName, "1")
+			} else {
+				connection.Set(symbolName, "0")
+			}
+			currentSymbol.Walk()
+		})  
+	}
+	*/
+	
+	g.notificationChan = make(chan *adsLib.Update)
+	
+	return nil
+}
