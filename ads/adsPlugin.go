@@ -155,7 +155,7 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
             g.log.Errorf("Failed to connect to PLC at %s: %v", g.targetIP, err)
             return
         }
-
+		
         // Read device info
         g.log.Infof("Read device info")
         g.deviceInfo, err = g.handler.ReadDeviceInfo()
@@ -177,6 +177,7 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
             g.log.Infof("Adding symbol notification for %s", symbolName)
             g.handler.AddSymbolNotification(symbolName, g.notificationChan)
         }
+		
     }()
 
     // Wait for the goroutine to complete and check for errors
