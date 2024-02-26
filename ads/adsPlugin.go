@@ -204,7 +204,7 @@ message := service.NewMessage(nil)
 			message = service.NewMessage(content)
 		}
 	}
-	msgs := make(service.MessageBatch, 0)
+	
 	return message, func(ctx context.Context, err error) error {
 		// Nacks are retried automatically when we use service.AutoRetryNacks
 		return nil
@@ -239,7 +239,10 @@ func (g *adsCommInput) ReadBatchNotification(ctx context.Context) (*service.Mess
 
     // Create a new message with the structured content
     message := service.NewMessage(content)
-
+	return message, func(ctx context.Context, err error) error {
+		// Nacks are retried automatically when we use service.AutoRetryNacks
+		return nil
+	}, nil
 }
 func (g *adsCommInput) Close(ctx context.Context) error {
 	if g.handler != nil {
