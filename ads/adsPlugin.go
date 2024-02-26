@@ -48,7 +48,7 @@ var adsConf = service.NewConfigSpec().
 	//Field(service.NewStringListField("symbols").Description("List of symbols and data type for each to read in the format 'function.name,int32', e.g., 'MAIN.counter,int32', '.globalCounter,int64' "))
 
 
-func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (interface{},, error) {
+func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchInput, error) {
 	targetIP, err := conf.FieldString("targetIP")
 	if err != nil {
 		return nil, err
@@ -110,57 +110,21 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (interf
 		timeout:      	time.Duration(timeoutInt) * time.Second,
 	}
 
-	if readType == "notification" {
-        return service.AutoRetryNacks(m), nil
-    } else if inputType == "interval" {
-        return service.AutoRetryNacksBatched(m), nil
-    } else {
-        return nil, errors.New("unsupported input type")
-    }
+    return service.AutoRetryNacksBatched(m), nil
+ 
 }
 
 func init() {
-	err := service.RegisterInput(
+	err := service.RegisterBatchInput(
 		"adsinput", adsConf,
-		func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
+		func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchInput, error) {
 			return newAdsCommInput(conf, mgr)
 		})
 	if err != nil {
 		panic(err)
 	}
 }
-func init() {
-    conf := &service.ConfigSpec{
-        Fields: service.AllCommonConfigFields(),
-        // Add other config fields as needed
-    }
 
-    // Obtain the "type" field from the config
-    inputType, _ := conf.FieldString("readType")
-
-    // Register the appropriate input type based on the "type" field
-    if inputType == "notification" {
-        err := service.RegisterInput(
-			"adsinput", adsConf,
-			func(conf *service.ParsedConfig, mgr *service.Resources) (service.Input, error) {
-				return newAdsCommInput(conf, mgr)
-			})
-        if err != nil {
-            panic(err)
-        }
-    } else if inputType == "interval" {
-        err := service.RegisterInput(
-			"adsinput", adsConf,
-			func(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchInput, error) {
-				return newAdsCommInput(conf, mgr)
-			})
-        if err != nil {
-            panic(err)
-        }
-    } else {
-        panic("unsupported input type")
-    }
-}
 
 func (g *adsCommInput) Connect(ctx context.Context) error {
     // Create a new connection
@@ -206,19 +170,49 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
     return nil
 }
 
-func (g *S7CommInput) ReadBatch(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
-	if g.client == nil {
-		return nil, nil, fmt.Errorf("PLC client is not initialized")
+func (g *adsCommInput) ReadBatch(ctx context.Context) (*service.MessageBatch, service.AckFunc, error) {
+	if g.readType == "notification" {
+		return g.ReadBatchNoticifation(ctx)
+	} else {
+		return g.ReadBatchPull(ctx)
 	}
-
-	msgs := make(service.MessageBatch, 0)
 }
-func (g *adsCommInput) Read(ctx context.Context) (*service.Message, service.AckFunc, error) {
+
+func (g *adsCommInput) ReadBatchPull(ctx context.Context) (*service.MessageBatch, service.AckFunc, error) {
 	if g.handler == nil {
 		// Handle the case where g.handler is nil, e.g., return an error
 		return nil, nil, fmt.Errorf("handler is nil")
 	}
-/*
+
+message := service.NewMessage(nil)
+	if g.readType == "interval" {
+		for _, symbolName := range g.symbols {
+			g.log.Infof("reading symbol  %s", symbolName)
+			res, _ := g.handler.ReadFromSymbol(symbolName)
+			contentMap := map[string]interface{}{
+				"Variable":  symbolName,
+				"Value":     res,
+			}
+			// Convert the map to JSON
+			content, err := json.Marshal(contentMap)
+			if err != nil {
+				// Handle the error, e.g., log or return an error
+				return nil, nil, fmt.Errorf("failed to marshal update content: %v", err)
+			}
+		
+			// Create a new message with the structured content
+			message = service.NewMessage(content)
+		}
+	}
+	msgs := make(service.MessageBatch, 0)
+	return message, func(ctx context.Context, err error) error {
+		// Nacks are retried automatically when we use service.AutoRetryNacks
+		return nil
+	}, nil
+}
+
+func (g *adsCommInput) ReadBatchNotification(ctx context.Context) (*service.MessageBatch, service.AckFunc, error) {
+
 	var res *adsLib.Update
 	select {
 	case res = <-g.notificationChan:
@@ -245,35 +239,8 @@ func (g *adsCommInput) Read(ctx context.Context) (*service.Message, service.AckF
 
     // Create a new message with the structured content
     message := service.NewMessage(content)
-*/
-message := service.NewMessage(nil)
-	if g.readType == "interval" {
-		for _, symbolName := range g.symbols {
-			g.log.Infof("reading symbol  %s", symbolName)
-			res, _ := g.handler.ReadFromSymbol(symbolName)
-			contentMap := map[string]interface{}{
-				"Variable":  symbolName,
-				"Value":     res,
-			}
-			// Convert the map to JSON
-			content, err := json.Marshal(contentMap)
-			if err != nil {
-				// Handle the error, e.g., log or return an error
-				return nil, nil, fmt.Errorf("failed to marshal update content: %v", err)
-			}
-		
-			// Create a new message with the structured content
-			message = service.NewMessage(content)
-		}
-	}
-	return message, func(ctx context.Context, err error) error {
-		// Nacks are retried automatically when we use service.AutoRetryNacks
-		return nil
-	}, nil
+
 }
-
-
-
 func (g *adsCommInput) Close(ctx context.Context) error {
 	if g.handler != nil {
 		if g.readType == "notification" {
