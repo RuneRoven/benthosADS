@@ -3,7 +3,7 @@ package adsPlugin
 import (
 	"context"
 	"time"
-	"sync"
+	//"sync"
 	"errors"
 	"fmt"
 	"encoding/json"
@@ -98,16 +98,17 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 	//}
 
 	m := &adsCommInput{
-		targetIP:   	targetIP,
-		targetAMS:  	targetAMS,
-		port:       	port,
-		hostAMS:		hostAMS,
-		readType: 		readType,
-		cycleTime:		cycleTime,
-		maxDelay:		maxDelay,
-		symbols:		symbols,
-		log:          	mgr.Logger(),
-		timeout:      	time.Duration(timeoutInt) * time.Second,
+		targetIP:   		targetIP,
+		targetAMS:  		targetAMS,
+		port:       		port,
+		hostAMS:			hostAMS,
+		readType: 			readType,
+		cycleTime:			cycleTime,
+		maxDelay:			maxDelay,
+		symbols:			symbols,
+		log:          		mgr.Logger(),
+		timeout:      		time.Duration(timeoutInt) * time.Second,
+		notificationChan: make(chan *adsLib.Update),
 	}
 
     return service.AutoRetryNacksBatched(m), nil
@@ -127,6 +128,9 @@ func init() {
 
 
 func (g *adsCommInput) Connect(ctx context.Context) error {
+	if g.handler != nil {
+		return nil
+	}
     // Create a new connection
     var err error
     g.handler, err = adsLib.NewConnection(ctx, g.targetIP, 48898, g.targetAMS, g.port, g.hostAMS, 10500)
@@ -135,12 +139,20 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
         return err
     }
     // Use a mutex to synchronize access to shared variables
-    var mu sync.Mutex
-
+    /*var mu sync.Mutex
+	// Ensure the notificationChan is initialized
+	mu.Lock()
+	defer mu.Unlock()
+	if g.notificationChan == nil {
+		g.notificationChan = make(chan *adsLib.Update)
+	}
+	*/
 	// Connect to the PLC
 	err = g.handler.Connect(false)
 	if err != nil {
 		g.log.Errorf("Failed to connect to PLC at %s: %v", g.targetIP, err)
+		g.handler.Close()
+        g.handler = nil
 		return err
 	}
 	
@@ -152,67 +164,58 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 		return
 	}*/
 	// g.log.Infof("Successfully connected to \"%s\" version %d.%d (build %d)", g.deviceInfo.DeviceName, g.deviceInfo.Major, g.deviceInfo.Minor, g.deviceInfo.Version)
-	if g.readType == "notification" {
-		// Ensure the notificationChan is initialized
-		mu.Lock()
-		defer mu.Unlock()
-		if g.notificationChan == nil {
-			g.notificationChan = make(chan *adsLib.Update)
-		}
+	
+	go g.handleBackgroundUpdates(ctx)
 
+	if g.readType == "notification" {
 		// Add symbol notifications
 		for _, symbolName := range g.symbols {
 			g.log.Infof("Adding symbol notification for %s", symbolName)
 			g.handler.AddSymbolNotification(symbolName, g.notificationChan)
 		}
 	}
-
+	
     return nil
 }
 
-func (g *adsCommInput) ReadBatch(ctx context.Context) (*service.MessageBatch, service.AckFunc, error) {
-	if g.readType == "notification" {
-		return g.ReadBatchNoticifation(ctx)
-	} else {
-		return g.ReadBatchPull(ctx)
-	}
-}
-
-func (g *adsCommInput) ReadBatchPull(ctx context.Context) (*service.MessageBatch, service.AckFunc, error) {
+func (g *adsCommInput) ReadBatchPull(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
+	g.log.Infof("ReadBatchPull called")
 	if g.handler == nil {
-		// Handle the case where g.handler is nil, e.g., return an error
-		return nil, nil, fmt.Errorf("handler is nil")
+		return nil, nil, errors.New("client is nil")
 	}
+	// 
 
-message := service.NewMessage(nil)
-	if g.readType == "interval" {
-		for _, symbolName := range g.symbols {
-			g.log.Infof("reading symbol  %s", symbolName)
-			res, _ := g.handler.ReadFromSymbol(symbolName)
-			contentMap := map[string]interface{}{
-				"Variable":  symbolName,
-				"Value":     res,
-			}
-			// Convert the map to JSON
-			content, err := json.Marshal(contentMap)
-			if err != nil {
-				// Handle the error, e.g., log or return an error
-				return nil, nil, fmt.Errorf("failed to marshal update content: %v", err)
-			}
-		
-			// Create a new message with the structured content
-			message = service.NewMessage(content)
+	msgs := service.MessageBatch{}
+	for _, symbolName := range g.symbols {
+		g.log.Infof("reading symbol  %s", symbolName)
+		res, _ := g.handler.ReadFromSymbol(symbolName)
+		contentMap := map[string]interface{}{
+			"Variable":  symbolName,
+			"Value":     res,
 		}
+		// Convert the map to JSON
+		content, err := json.Marshal(contentMap)
+		if err != nil {
+			// Handle the error, e.g., log or return an error
+			return nil, nil, fmt.Errorf("failed to marshal update content: %v", err)
+		}
+		// Create a new message with the structured content
+		message := service.NewMessage(content)
+		if message != nil {
+			msgs = append(msgs, message)
+		}
+		// Create a new message with the structured content
+		
 	}
 	
-	return message, func(ctx context.Context, err error) error {
+	return msgs, func(ctx context.Context, err error) error {
 		// Nacks are retried automatically when we use service.AutoRetryNacks
 		return nil
 	}, nil
 }
 
-func (g *adsCommInput) ReadBatchNotification(ctx context.Context) (*service.MessageBatch, service.AckFunc, error) {
-
+func (g *adsCommInput) ReadBatchNotification(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
+	g.log.Infof("ReadBatchNotification called")
 	var res *adsLib.Update
 	select {
 	case res = <-g.notificationChan:
@@ -236,26 +239,42 @@ func (g *adsCommInput) ReadBatchNotification(ctx context.Context) (*service.Mess
         // Handle the error, e.g., log or return an error
         return nil, nil, fmt.Errorf("failed to marshal update content: %v", err)
     }
-
+	
+	
+	message := service.NewMessage(content)
+	msgs := service.MessageBatch{}
     // Create a new message with the structured content
-    message := service.NewMessage(content)
-	return message, func(ctx context.Context, err error) error {
+	msgs = append(msgs, message)
+	return msgs, func(ctx context.Context, err error) error {
 		// Nacks are retried automatically when we use service.AutoRetryNacks
 		return nil
 	}, nil
 }
+
+func (g *adsCommInput) ReadBatch(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
+	g.log.Infof("ReadBatch called")
+	if g.readType == "notification" {
+		return g.ReadBatchNotification(ctx)
+	} else {
+		return g.ReadBatchPull(ctx)
+	}
+}
+
 func (g *adsCommInput) Close(ctx context.Context) error {
+	g.log.Infof("Close called")
 	if g.handler != nil {
+		g.log.Infof("Closing down")
 		if g.readType == "notification" {
-		for _, symbolName := range g.symbols {
-			handle, err := g.handler.GetHandleByName(symbolName)
-			if err != nil {
-				g.log.Errorf("Failed to get handle for symbol %s", symbolName)
-				return nil
+			for _, symbolName := range g.symbols {
+				handle, err := g.handler.GetHandleByName(symbolName)
+				if err != nil {
+					g.log.Errorf("Failed to get handle for symbol %s", symbolName)
+					return nil
+				}
+				g.handler.DeleteDeviceNotification(handle)
 			}
-			g.handler.DeleteDeviceNotification(handle)
-        }
-		}else {
+		}
+		if g.notificationChan != nil {
 			close(g.notificationChan)
 		}
         g.handler.Close()
@@ -263,4 +282,18 @@ func (g *adsCommInput) Close(ctx context.Context) error {
 	}
 
 	return nil
+}
+func (g *adsCommInput) handleBackgroundUpdates(ctx context.Context) {
+    for {
+        select {
+        case <-ctx.Done():
+			g.log.Infof("ctx done")
+            // Context canceled, exit goroutine.
+            return
+        case res := <-g.notificationChan:
+            // Process background update.
+            // You can add logic to handle these updates if needed.
+            g.log.Infof("Received background update: %+v", res)
+        }
+    }
 }
