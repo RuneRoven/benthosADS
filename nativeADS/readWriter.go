@@ -38,9 +38,9 @@ func (symbol *Symbol) parse(data []byte, offset int) (string, error) {
 				return "", fmt.Errorf("BOOL Size Wrong")
 			}
 			if data[start:stop][0] > 0 {
-				newValue = "True"
+				newValue = "true"
 			} else {
-				newValue = "False"
+				newValue = "false"
 			}
 		case "BYTE", "USINT": // Unsigned Short INT 0 to 255
 			if stop-start != 1 {

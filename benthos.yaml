@@ -8,16 +8,23 @@ input:
     readType: 'interval'             
     cycleTime: 10
     maxDelay: 0
-    timeout: 10
+    intervalTime: 3000
     logLevel: "disabled"
     symbols:               # List of addresses to read from
       - "MAIN.MYBOOL"     # Accesses a
 
-
 pipeline:
   processors:
-    - mapping: |
-        root.message = this
+    - bloblang: |
+        root = {
+          meta("symbol_name"): this,
+          "timestamp_ms": (timestamp_unix_nano() / 1000000).floor()
+        }
+
+#pipeline:
+#  processors:
+#    - mapping: |
+#        root.message = this
 
 output:
   stdout: {}

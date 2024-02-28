@@ -6,11 +6,16 @@ import (
 	//"sync"
 	"errors"
 	"fmt"
+	"regexp"
 	"encoding/json"
 	"github.com/rs/zerolog"
 	"github.com/benthosdev/benthos/v4/public/service"
 	adsLib "gitlab.com/xilix-systems-llc/go-native-ads/v4" 
 )
+func sanitize(s string) string {
+	re := regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+	return re.ReplaceAllString(s, "_")
+}
 
 // ads communication struct defines the structure for our custom Benthos input plugin.
 // It holds the configuration necessary to establish a connection with a Beckhoff PLC,
@@ -210,11 +215,18 @@ func (g *adsCommInput) ReadBatchPull(ctx context.Context) (service.MessageBatch,
 		return nil, nil, errors.New("client is nil")
 	}
 	// 
-
+	
 	msgs := service.MessageBatch{}
+	b := make([]byte, 0)
 	for _, symbolName := range g.symbols {
 		g.log.Infof("reading symbol  %s", symbolName)
 		res, _ := g.handler.ReadFromSymbol(symbolName)
+		b = append(b, []byte(res)...)
+		valueMsg := service.NewMessage(b)
+		valueMsg.MetaSet("symbol_name", sanitize(symbolName)) 
+		
+		msgs = append(msgs, valueMsg)
+		/*
 		contentMap := map[string]interface{}{
 			"Variable":  symbolName,
 			"Value":     res,
@@ -230,6 +242,7 @@ func (g *adsCommInput) ReadBatchPull(ctx context.Context) (service.MessageBatch,
 		if message != nil {
 			msgs = append(msgs, message)
 		}
+		*/
 		// Create a new message with the structured content
 		// Wait for a second before returning a message.
 	
