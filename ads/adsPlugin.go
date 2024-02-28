@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"encoding/json"
+	"github.com/rs/zerolog"
 	"github.com/benthosdev/benthos/v4/public/service"
 	adsLib "gitlab.com/xilix-systems-llc/go-native-ads/v4" 
 )
@@ -22,10 +23,10 @@ type adsCommInput struct {
 	readType 		string									// Read type, interval or notification
 	cycleTime		int										// Read interval time if read type interval, cycle time if read type notification in milliseconds
 	maxDelay		int										// Max delay time after value change before PLC should send message, in milliseconds
-	timeout     	time.Duration                        	// Time duration before a connection attempt or read request times out.
-	handler     	*adsLib.Connection							// TCP handler to manage the connection.
+	intervalTime   	time.Duration                        	// Time duration before a connection attempt or read request times out.
+	handler     	*adsLib.Connection						// TCP handler to manage the connection.
 	log         	*service.Logger                       	// Logger for logging plugin activity.
-	symbols     	[]string 								// List of items to read from the PLC, grouped into batches with a maximum size.
+	symbols     	[]string 								// List of items to read from the PLC, grouped into batches with a maximum size.								
 	deviceInfo 		adsLib.DeviceInfo								// PLC device info 
 	deviceSymbols	adsLib.Symbol									// Received symbols from PLC
 	notificationChan chan *adsLib.Update
@@ -43,12 +44,38 @@ var adsConf = service.NewConfigSpec().
 	Field(service.NewStringField("readType").Description("Read type, interval or notification (default)").Default("notification")).
 	Field(service.NewIntField("cycleTime").Description("Read interval time if read type interval, cycle time if read type notification in milliseconds.").Default(1000)).
 	Field(service.NewIntField("maxDelay").Description("Max delay time after value change before PLC should send message, in milliseconds. Default 100").Default(100)).
-	Field(service.NewIntField("timeout").Description("The timeout duration in seconds for connection attempts and read requests.").Default(10)).
+	Field(service.NewIntField("intervalTime").Description("The interval time between reads milliseconds for read requests.").Default(1000)).
+	Field(service.NewStringField("logLevel").Description("Log level for ADS connection. Default disabled").Default("disabled")).
 	Field(service.NewStringListField("symbols").Description("List of symbols to read in the format 'function.name', e.g., 'MAIN.counter', '.globalCounter' "))
-	//Field(service.NewStringListField("symbols").Description("List of symbols and data type for each to read in the format 'function.name,int32', e.g., 'MAIN.counter,int32', '.globalCounter,int64' "))
-
 
 func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchInput, error) {
+	
+	logLevel, err := conf.FieldString("logLevel")
+	if err != nil {
+		return nil, err
+	}
+	// set log level of ADS library
+	switch logLevel {
+	case "panic":
+		zerolog.SetGlobalLevel(zerolog.PanicLevel)
+	case "fatal":
+		zerolog.SetGlobalLevel(zerolog.FatalLevel)
+	case "error":
+		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+	case "warn":
+		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	case "info":
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	case "debug":
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	case "trace":
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	case "disabled":
+		zerolog.SetGlobalLevel(zerolog.Disabled)
+	default:
+		zerolog.SetGlobalLevel(zerolog.Disabled)
+	}
+
 	targetIP, err := conf.FieldString("targetIP")
 	if err != nil {
 		return nil, err
@@ -88,14 +115,10 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		return nil, err
 	}
 
-	timeoutInt, err := conf.FieldInt("timeout")
+	timeoutInt, err := conf.FieldInt("intervalTime")
 	if err != nil {
 		return nil, err
 	}
-
-	//for _, value := range slice {
-	//	fmt.Printf("Value: %s\n", value)
-	//}
 
 	m := &adsCommInput{
 		targetIP:   		targetIP,
@@ -107,7 +130,7 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		maxDelay:			maxDelay,
 		symbols:			symbols,
 		log:          		mgr.Logger(),
-		timeout:      		time.Duration(timeoutInt) * time.Second,
+		intervalTime:      	time.Duration(timeoutInt) * time.Millisecond,
 		notificationChan: make(chan *adsLib.Update),
 	}
 
@@ -131,13 +154,17 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 	if g.handler != nil {
 		return nil
 	}
+
     // Create a new connection
+	g.log.Infof("Creating new connection")
     var err error
     g.handler, err = adsLib.NewConnection(ctx, g.targetIP, 48898, g.targetAMS, g.port, g.hostAMS, 10500)
     if err != nil {
         g.log.Errorf("Failed to create connection: %v", err)
         return err
     }
+
+
     // Use a mutex to synchronize access to shared variables
     /*var mu sync.Mutex
 	// Ensure the notificationChan is initialized
@@ -148,6 +175,7 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 	}
 	*/
 	// Connect to the PLC
+	g.log.Infof("Connecting to plc")
 	err = g.handler.Connect(false)
 	if err != nil {
 		g.log.Errorf("Failed to connect to PLC at %s: %v", g.targetIP, err)
@@ -155,7 +183,7 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
         g.handler = nil
 		return err
 	}
-	
+
 	// Read device info
 	/*   g.log.Infof("Read device info")
 	g.deviceInfo, err = g.handler.ReadDeviceInfo()
@@ -165,8 +193,6 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 	}*/
 	// g.log.Infof("Successfully connected to \"%s\" version %d.%d (build %d)", g.deviceInfo.DeviceName, g.deviceInfo.Major, g.deviceInfo.Minor, g.deviceInfo.Version)
 	
-	go g.handleBackgroundUpdates(ctx)
-
 	if g.readType == "notification" {
 		// Add symbol notifications
 		for _, symbolName := range g.symbols {
@@ -174,7 +200,7 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 			g.handler.AddSymbolNotification(symbolName, g.notificationChan)
 		}
 	}
-	
+	g.log.Infof("end of connect")
     return nil
 }
 
@@ -205,9 +231,10 @@ func (g *adsCommInput) ReadBatchPull(ctx context.Context) (service.MessageBatch,
 			msgs = append(msgs, message)
 		}
 		// Create a new message with the structured content
-		
-	}
+		// Wait for a second before returning a message.
 	
+	}
+	time.Sleep(g.intervalTime)
 	return msgs, func(ctx context.Context, err error) error {
 		// Nacks are retried automatically when we use service.AutoRetryNacks
 		return nil
@@ -264,7 +291,7 @@ func (g *adsCommInput) Close(ctx context.Context) error {
 	g.log.Infof("Close called")
 	if g.handler != nil {
 		g.log.Infof("Closing down")
-		if g.readType == "notification" {
+		/*if g.readType == "notification" {
 			for _, symbolName := range g.symbols {
 				handle, err := g.handler.GetHandleByName(symbolName)
 				if err != nil {
@@ -274,6 +301,7 @@ func (g *adsCommInput) Close(ctx context.Context) error {
 				g.handler.DeleteDeviceNotification(handle)
 			}
 		}
+		*/
 		if g.notificationChan != nil {
 			close(g.notificationChan)
 		}
@@ -282,18 +310,4 @@ func (g *adsCommInput) Close(ctx context.Context) error {
 	}
 
 	return nil
-}
-func (g *adsCommInput) handleBackgroundUpdates(ctx context.Context) {
-    for {
-        select {
-        case <-ctx.Done():
-			g.log.Infof("ctx done")
-            // Context canceled, exit goroutine.
-            return
-        case res := <-g.notificationChan:
-            // Process background update.
-            // You can add logic to handle these updates if needed.
-            g.log.Infof("Received background update: %+v", res)
-        }
-    }
 }

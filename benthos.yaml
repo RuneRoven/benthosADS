@@ -9,6 +9,7 @@ input:
     cycleTime: 10
     maxDelay: 0
     timeout: 10
+    logLevel: "disabled"
     symbols:               # List of addresses to read from
       - "MAIN.MYBOOL"     # Accesses a
 

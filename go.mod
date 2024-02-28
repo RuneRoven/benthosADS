@@ -3,6 +3,7 @@ module benthosADS
 go 1.21.6
 
 replace benthosADS/ads => ./ads
+replace "gitlab.com/xilix-systems-llc/go-native-ads/v4" => ./nativeADS
 
 require (
 	github.com/benthosdev/benthos/v4 v4.24.0
