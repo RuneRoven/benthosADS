@@ -70,7 +70,7 @@ func (symbol *Symbol) parse(data []byte, offset int) (string, error) {
 			}
 			i := binary.LittleEndian.Uint32(data[start:stop])
 			newValue = strconv.FormatUint(uint64(i), 10)
-		case "INT16":
+		case "INT", "INT16":
 			if stop-start != 2 {
 				return "", fmt.Errorf("INT Size Wrong")
 			}
@@ -186,6 +186,7 @@ var parseableTypes = []string{
 	"UDINT",
 	"DWORD",
 	"SINT",
+	"INT",
 	"INT16",
 	"DINT",
 	"REAL",
@@ -255,7 +256,7 @@ func (symbol *Symbol) writeToNode(value string, offset int, datatypes map[string
 
 		v8 := int8(v)
 		binary.Write(buf, binary.LittleEndian, &v8)
-	case "INT16":
+	case "INT", "INT16":
 		v, e := strconv.ParseInt(value, 10, 16)
 		if e != nil {
 			return nil, e

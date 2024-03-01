@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"encoding/json"
+	//"encoding/json"
 	"github.com/rs/zerolog"
 	"github.com/benthosdev/benthos/v4/public/service"
 	adsLib "gitlab.com/xilix-systems-llc/go-native-ads/v4" 
@@ -47,7 +47,7 @@ var adsConf = service.NewConfigSpec().
 	Field(service.NewIntField("port").Description("Target port. Default 801(Twincat 2)").Default(801)).
 	Field(service.NewStringField("hostAMS").Description("The host AMS net ID, use auto (default) to automatically derive AMS from host IP. Enter manually if auto not working").Default("auto")).
 	Field(service.NewStringField("readType").Description("Read type, interval or notification (default)").Default("notification")).
-	Field(service.NewIntField("cycleTime").Description("Read interval time if read type interval, cycle time if read type notification in milliseconds.").Default(1000)).
+	Field(service.NewIntField("cycleTime").Description("Requested read interval time for PLC to scan for changes if read type notification, in milliseconds.").Default(1000)).
 	Field(service.NewIntField("maxDelay").Description("Max delay time after value change before PLC should send message, in milliseconds. Default 100").Default(100)).
 	Field(service.NewIntField("intervalTime").Description("The interval time between reads milliseconds for read requests.").Default(1000)).
 	Field(service.NewStringField("logLevel").Description("Log level for ADS connection. Default disabled").Default("disabled")).
@@ -105,6 +105,9 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 	if err != nil {
 		return nil, err
 	}
+	if !(readType == "notification" || readType == "interval") {
+		return nil, errors.New("Wrong read type")
+	} 
 
 	cycleTime, err := conf.FieldInt("cycleTime")
 	if err != nil {
@@ -202,7 +205,7 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 		// Add symbol notifications
 		for _, symbolName := range g.symbols {
 			g.log.Infof("Adding symbol notification for %s", symbolName)
-			g.handler.AddSymbolNotification(symbolName, g.notificationChan)
+			g.handler.AddSymbolNotification(symbolName,g.cycleTime, g.maxDelay, g.notificationChan)
 		}
 	}
 	g.log.Infof("end of connect")
@@ -217,8 +220,9 @@ func (g *adsCommInput) ReadBatchPull(ctx context.Context) (service.MessageBatch,
 	// 
 	
 	msgs := service.MessageBatch{}
-	b := make([]byte, 0)
+	
 	for _, symbolName := range g.symbols {
+		b := make([]byte, 0)
 		g.log.Infof("reading symbol  %s", symbolName)
 		res, _ := g.handler.ReadFromSymbol(symbolName)
 		b = append(b, []byte(res)...)
@@ -226,26 +230,6 @@ func (g *adsCommInput) ReadBatchPull(ctx context.Context) (service.MessageBatch,
 		valueMsg.MetaSet("symbol_name", sanitize(symbolName)) 
 		
 		msgs = append(msgs, valueMsg)
-		/*
-		contentMap := map[string]interface{}{
-			"Variable":  symbolName,
-			"Value":     res,
-		}
-		// Convert the map to JSON
-		content, err := json.Marshal(contentMap)
-		if err != nil {
-			// Handle the error, e.g., log or return an error
-			return nil, nil, fmt.Errorf("failed to marshal update content: %v", err)
-		}
-		// Create a new message with the structured content
-		message := service.NewMessage(content)
-		if message != nil {
-			msgs = append(msgs, message)
-		}
-		*/
-		// Create a new message with the structured content
-		// Wait for a second before returning a message.
-	
 	}
 	time.Sleep(g.intervalTime)
 	return msgs, func(ctx context.Context, err error) error {
@@ -263,28 +247,17 @@ func (g *adsCommInput) ReadBatchNotification(ctx context.Context) (service.Messa
 	case <-ctx.Done():
 		// Context canceled, return an error or handle accordingly
 		return nil, nil, fmt.Errorf("context canceled")
-	case <-time.After(time.Second): // Add a timeout to avoid blocking indefinitely
+	case <-time.After(10*time.Second): // Add a timeout to avoid blocking indefinitely
 		// Handle timeout, e.g., return an error or empty message
 		return nil, nil, fmt.Errorf("timeout waiting for update")
 	}
-
-	contentMap := map[string]interface{}{
-        "Variable":  res.Variable,
-        "Value":     res.Value,
-        "TimeStamp": res.TimeStamp,
-    }
-	// Convert the map to JSON
-    content, err := json.Marshal(contentMap)
-    if err != nil {
-        // Handle the error, e.g., log or return an error
-        return nil, nil, fmt.Errorf("failed to marshal update content: %v", err)
-    }
-	
-	
-	message := service.NewMessage(content)
 	msgs := service.MessageBatch{}
-    // Create a new message with the structured content
-	msgs = append(msgs, message)
+	b := make([]byte, 0)
+	b = append(b, []byte(res.Value)...)
+	valueMsg := service.NewMessage(b)
+	valueMsg.MetaSet("symbol_name", sanitize(res.Variable)) 
+	msgs = append(msgs, valueMsg)
+
 	return msgs, func(ctx context.Context, err error) error {
 		// Nacks are retried automatically when we use service.AutoRetryNacks
 		return nil
@@ -297,24 +270,13 @@ func (g *adsCommInput) ReadBatch(ctx context.Context) (service.MessageBatch, ser
 		return g.ReadBatchNotification(ctx)
 	} else {
 		return g.ReadBatchPull(ctx)
-	}
+	} 
 }
 
 func (g *adsCommInput) Close(ctx context.Context) error {
 	g.log.Infof("Close called")
 	if g.handler != nil {
 		g.log.Infof("Closing down")
-		/*if g.readType == "notification" {
-			for _, symbolName := range g.symbols {
-				handle, err := g.handler.GetHandleByName(symbolName)
-				if err != nil {
-					g.log.Errorf("Failed to get handle for symbol %s", symbolName)
-					return nil
-				}
-				g.handler.DeleteDeviceNotification(handle)
-			}
-		}
-		*/
 		if g.notificationChan != nil {
 			close(g.notificationChan)
 		}

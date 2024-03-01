@@ -6,12 +6,15 @@ input:
     port: 801                  
     hostAMS: '192.168.56.1.1.1'         
     readType: 'interval'             
-    cycleTime: 10
-    maxDelay: 0
+    cycleTime: 100
+    maxDelay: 100
     intervalTime: 3000
     logLevel: "disabled"
     symbols:               # List of addresses to read from
       - "MAIN.MYBOOL"     # Accesses a
+      - "MAIN.MYTRIGGER"  
+      - "MAIN.SPEEDOS"  
+
 
 pipeline:
   processors:
