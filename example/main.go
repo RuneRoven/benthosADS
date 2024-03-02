@@ -1,4 +1,4 @@
-package main
+/*package main
 
 import (
 	"context"
@@ -6,11 +6,12 @@ import (
 
 	// Import all standard Benthos components
 	_ "github.com/benthosdev/benthos/v4/public/components/all"
-	_ "benthosADS/ads"
-
+	//_ "benthosADS/ads"
+	//"https://github.com/RuneRoven/ads
 
 )
 
 func main() {
 	service.RunCLI(context.Background())
 }
+*/

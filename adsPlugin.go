@@ -12,8 +12,7 @@ import (
 	"github.com/benthosdev/benthos/v4/public/service"
 	"github.com/rs/zerolog"
 
-	//adsLib "gitlab.com/xilix-systems-llc/go-native-ads/v4"
-	adsLib "benthosADS/ads/nativeADS"
+	adsLib "benthosADS/nativeADS"
 )
 
 type plcSymbol struct {
