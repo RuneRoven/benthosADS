@@ -1,3 +1,10 @@
+## Get started
+Get the required modules for benthos.
+Compile the example files
+Run the example file. in Windows: 
+./example.exe -c benthos.yaml 
+
+
 ### ads
 Input for Beckhoffs ads protocol. Supports batch reading and notifications.
 Beckhoff recommends not using more than about 500 notifications due to the impact of the controller.
@@ -63,11 +70,12 @@ There are basically 2 ways for setting up the connection. One is to use the Twin
 
 #### Output
 
-Similar to the OPC UA input, this outputs for each address a single message with the payload being the value that was read. To distinguish messages, you can use meta("symbol_name") in a following benthos bloblang processor.
+This outputs for each address a single message with the payload being the value that was read. To distinguish messages, you can use meta("symbol_name") in a following benthos bloblang processor.
 
 ## Testing
 
-We execute automated tests and verify that benthos-ads works:
+Tested and verified:
 #### cx1020, Twincat 2 
 - Read batches, Add notifications, different cycle times and max delay.
 - Different datatypes, INT, INT16, UINT, DINT, BOOL, STRUCT, and more
+
