@@ -1,6 +1,6 @@
 module github.com/RuneRoven/benthosADS
 
-go 1.21.6
+go 1.21.6  
 
 replace benthosADS/ads => ./ads
 
