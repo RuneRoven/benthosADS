@@ -157,7 +157,7 @@ func (conn *Connection) GetUploadSymbolInfoDataTypes(length uint32) (data []byte
 	return data, nil
 }
 
-func (conn *Connection) AddSymbolNotification(symbolName string, cycleTime int, maxDelay int, updateReceiver chan *Update) error {
+func (conn *Connection) AddSymbolNotification(symbolName string, maxDelay int, cycleTime int, updateReceiver chan *Update) error {
 	symbol, err := conn.GetSymbol(symbolName)
 	if err != nil {
 		log.

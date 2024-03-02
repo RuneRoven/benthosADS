@@ -1,20 +1,24 @@
 ---
 input:
-  adsinput:
+  ads:
     targetIP: '192.168.3.70' # IP address 
-    targetAMS: '5.3.69.134.1.1'                  
-    port: 801                  
-    hostAMS: '192.168.56.1.1.1'         
-    readType: 'interval'             
+    targetAMS: '5.3.69.134.1.1'   
+    targetPort: 48898               
+    runtimePort: 801                  
+    hostAMS: '192.168.56.1.1.1'       
+    hostPort: 10500  
+    readType: 'interval'   
+    maxDelay: 100        
     cycleTime: 100
-    maxDelay: 100
-    intervalTime: 3000
+    intervalTime: 1000
+    upperCase: true
     logLevel: "disabled"
     symbols:               # List of addresses to read from
       - "MAIN.MYBOOL"     # Accesses a
-      - "MAIN.MYTRIGGER"  
+      - "MAIN.MYTRIGGER:0:10"  
       - "MAIN.SPEEDOS"  
-
+      - ".superDuperInt"
+      - ".someStrangeVar"
 
 pipeline:
   processors:
@@ -24,15 +28,10 @@ pipeline:
           "timestamp_ms": (timestamp_unix_nano() / 1000000).floor()
         }
 
-#pipeline:
-#  processors:
-#    - mapping: |
-#        root.message = this
-
 output:
   stdout: {}
 
 logger:
-  level: ALL
+  level: ERROR
   format: logfmt
   add_timestamp: true

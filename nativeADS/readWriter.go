@@ -58,7 +58,7 @@ func (symbol *Symbol) parse(data []byte, offset int) (string, error) {
 			var i int8
 			binary.Read(buf, binary.LittleEndian, &i)
 			newValue = strconv.FormatInt(int64(i), 10)
-		case "UINT", "WORD":
+		case "UINT", "WORD", "UINT16":
 			if stop-start != 2 {
 				return "", fmt.Errorf("WORD Size Wrong")
 			}
@@ -182,6 +182,7 @@ var parseableTypes = []string{
 	"BYTE",
 	"USINT",
 	"UINT",
+	"UINT16",
 	"WORD",
 	"UDINT",
 	"DWORD",
@@ -231,7 +232,7 @@ func (symbol *Symbol) writeToNode(value string, offset int, datatypes map[string
 
 		v8 := uint8(v)
 		binary.Write(buf, binary.LittleEndian, &v8)
-	case "UINT", "WORD":
+	case "UINT", "WORD", "UINT16":
 		v, e := strconv.ParseUint(value, 10, 16)
 		if e != nil {
 			return nil, e
