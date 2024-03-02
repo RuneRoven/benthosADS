@@ -3,11 +3,13 @@ module benthosADS
 go 1.21.6
 
 replace benthosADS/ads => ./ads
-replace "gitlab.com/xilix-systems-llc/go-native-ads/v4" => ./nativeADS
+
 
 require (
 	github.com/benthosdev/benthos/v4 v4.24.0
-	gitlab.com/xilix-systems-llc/go-native-ads/v4 v4.0.8
+	github.com/rs/zerolog v1.23.0
+	go.uber.org/atomic v1.11.0
+
 )
 
 require (
@@ -219,7 +221,6 @@ require (
 	github.com/rickb777/plural v1.4.1 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
-	github.com/rs/zerolog v1.23.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
 	github.com/segmentio/encoding v0.3.5 // indirect
@@ -266,7 +267,6 @@ require (
 	go.opentelemetry.io/otel/sdk v1.21.0 // indirect
 	go.opentelemetry.io/otel/trace v1.21.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.0.0 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.19.0 // indirect
 	golang.org/x/exp v0.0.0-20230725093048-515e97ebf090 // indirect
