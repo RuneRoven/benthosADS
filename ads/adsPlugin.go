@@ -94,7 +94,7 @@ type adsCommInput struct {
 }
 
 var adsConf = service.NewConfigSpec().
-	Summary("Creates an input that reads data from Beckhoff PLCs using adsLib. Created by Daniel H & maintained by the United Manufacturing Hub. About us: www.umh.app").
+	Summary("Creates an input that reads data from Beckhoff PLCs using adsLib. Created by Daniel H").
 	Description("This input plugin enables Benthos to read data directly from Beckhoff PLCs using the ADS protocol. " +
 		"Configure the plugin by specifying the PLC's IP address, runtime port, target AMS net ID, etc. etc, add more here.").
 	Field(service.NewStringField("targetIP").Description("IP address of the Beckhoff PLC.")).
