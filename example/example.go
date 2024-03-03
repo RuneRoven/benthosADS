@@ -1,4 +1,4 @@
-package github.com/RuneRoven/benthosADS/example
+package example
 
 import (
 	"context"
