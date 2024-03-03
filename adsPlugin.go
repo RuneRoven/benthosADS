@@ -1,4 +1,4 @@
-package adsPlugin
+package benthosADS
 
 import (
 	"context"
