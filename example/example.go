@@ -1,4 +1,4 @@
-package example
+package main
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	// Import all standard Benthos components
 	_ "github.com/benthosdev/benthos/v4/public/components/all"
 
-	"github.com/RuneRoven/benthosADS"
+	_ "github.com/RuneRoven/benthosADS"
 )
  
 func main() {
