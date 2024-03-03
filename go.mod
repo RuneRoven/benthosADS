@@ -1,7 +1,7 @@
 module github.com/RuneRoven/benthosADS
 
 go 1.21.6
-
+  
 require (
 	github.com/benthosdev/benthos/v4 v4.25.1
 	github.com/rs/zerolog v1.32.0
