@@ -3,7 +3,7 @@ module github.com/RuneRoven/benthosADS
 go 1.24.1
 
 require (
-	github.com/redpanda-data/benthos/v4 v4.55.0
+	github.com/redpanda-data/benthos/v4 v4.49.0
 	github.com/rs/zerolog v1.34.0
 	go.uber.org/atomic v1.11.0
 )

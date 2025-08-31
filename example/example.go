@@ -3,15 +3,14 @@ package main
 import (
 	"context"
 
-	"github.com/benthosdev/benthos/v4/public/service"
+	"github.com/redpanda-data/benthos/v4/public/service"
 
-	// Import all standard Benthos components
-	_ "github.com/benthosdev/benthos/v4/public/components/all"
+	// Import full suite of FOSS connect plugins
+	_ "github.com/redpanda-data/connect/public/bundle/free/v4"
 
 	_ "github.com/RuneRoven/benthosADS"
 )
- 
+
 func main() {
 	service.RunCLI(context.Background())
 }
-  
