@@ -1,0 +1,48 @@
+name: Go Module Auto Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Checkout code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Setup Git
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Bump patch version and create tag
+      - name: Bump version
+        id: bump
+        run: |
+          # Get the latest tag (default to v1.0.0 if none exists)
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo v1.0.0)
+          echo "Current tag: $TAG"
+
+          # Increment the patch version
+          VERSION=$(echo $TAG | awk -F. '{printf "v%d.%d.%d", substr($1,2), $2, $3+1}')
+          echo "New version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_ENV
+
+          # Create and push new tag
+          git tag $VERSION
+          git push origin $VERSION
+
+      # Create GitHub Release
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.version }}
+          name: "Release ${{ env.version }}"
+          body: "Automated release of Go module."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
