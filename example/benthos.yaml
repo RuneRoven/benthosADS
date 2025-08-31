@@ -14,7 +14,7 @@ input:
       upperCase: true
       logLevel: "trace"
       symbols:               # List of addresses to read from
-        - "MAIN.MYBOOL"     # Accesses a
+        - "MAIN.MYBOOL"     # Accesses a bool
         - "MAIN.MYTRIGGER:0:10"  
         - "MAIN.SPEEDOS"  
         - ".superDuperInt"
