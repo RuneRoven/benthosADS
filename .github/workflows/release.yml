@@ -2,47 +2,59 @@ name: Go Module Auto Release
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+
+permissions:
+  contents: write
 
 jobs:
-  release:
+  tag-and-release:
     runs-on: ubuntu-latest
-
     steps:
-      # Checkout code
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
-      # Setup Git
-      - name: Setup Git
+      - name: Fetch tags
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch --force --tags
+          echo "Tags in repo:"
+          git tag -l
 
-      # Bump patch version and create tag
-      - name: Bump version
-        id: bump
+      - name: Compute next version
+        id: ver
+        shell: bash
         run: |
-          # Get the latest tag (default to v1.0.0 if none exists)
-          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo v1.0.0)
-          echo "Current tag: $TAG"
+          # Find latest v* tag by semantic sort
+          LAST_TAG=$(git tag --list "v*" --sort=-v:refname | head -n1)
+          if [ -z "$LAST_TAG" ]; then
+            LAST_TAG="v1.0.0"
+          fi
+          echo "Last tag: $LAST_TAG"
 
-          # Increment the patch version
-          VERSION=$(echo $TAG | awk -F. '{printf "v%d.%d.%d", substr($1,2), $2, $3+1}')
-          echo "New version: $VERSION"
-          echo "version=$VERSION" >> $GITHUB_ENV
+          CORE=${LAST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<<"$CORE"
+          NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH+1))"
+          echo "New tag: $NEW_TAG"
 
-          # Create and push new tag
-          git tag $VERSION
-          git push origin $VERSION
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
 
-      # Create GitHub Release
-      - name: Create Release
+      - name: Ensure authenticated push
+        run: |
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+      - name: Create and push tag
+        run: |
+          git tag ${{ steps.ver.outputs.new_tag }}
+          git push origin ${{ steps.ver.outputs.new_tag }}
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.version }}
-          name: "Release ${{ env.version }}"
-          body: "Automated release of Go module."
+          tag_name: ${{ steps.ver.outputs.new_tag }}
+          name: ${{ steps.ver.outputs.new_tag }}
+          body: "Automated release for Go module."
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
