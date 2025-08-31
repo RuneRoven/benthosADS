@@ -1,24 +1,24 @@
 ---
 input:
-  ads:
-    targetIP: '192.168.3.70' # IP address 
-    targetAMS: '5.3.69.134.1.1'   
-    targetPort: 48898               
-    runtimePort: 801                  
-    hostAMS: '192.168.56.1.1.1'       
-    hostPort: 10500  
-    readType: 'interval'   
-    maxDelay: 100        
-    cycleTime: 100
-    intervalTime: 1000
-    upperCase: true
-    logLevel: "disabled"
-    symbols:               # List of addresses to read from
-      - "MAIN.MYBOOL"     # Accesses a
-      - "MAIN.MYTRIGGER:0:10"  
-      - "MAIN.SPEEDOS"  
-      - ".superDuperInt"
-      - ".someStrangeVar"
+    ads:
+      targetIP: '192.168.3.70' # IP address 
+      targetAMS: '5.3.69.134.1.1'   
+      targetPort: 48898                     
+      runtimePort: 801                  
+      hostAMS: '192.168.3.152.1.1'       
+      hostPort: 10500  
+      readType: 'interval'   
+      maxDelay: 100        
+      cycleTime: 100
+      intervalTime: 1000
+      upperCase: true
+      logLevel: "trace"
+      symbols:               # List of addresses to read from
+        - "MAIN.MYBOOL"     # Accesses a
+        - "MAIN.MYTRIGGER:0:10"  
+        - "MAIN.SPEEDOS"  
+        - ".superDuperInt"
+        - ".someStrangeVar"
 
 pipeline:
   processors:
@@ -32,6 +32,12 @@ output:
   stdout: {}
 
 logger:
-  level: ERROR
+  level: TRACE
   format: logfmt
   add_timestamp: true
+#output:
+#  mqtt:
+#    urls:
+#      - tcp://192.168.3.22:1883
+#    topic: 'ia/raw/ads/${! meta("symbol_name") }'
+#    client_id: 'benthos-ads'
