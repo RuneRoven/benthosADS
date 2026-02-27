@@ -54,6 +54,8 @@ func isLikelyContainerIP(ip string) bool {
 	}
 	return false
 }
+
+
 func createSymbolList(s []string, defaultCycleTime int, defaultMaxDelay int, upperCase bool) []plcSymbol {
 	var newPlcSymbol []plcSymbol
 	// Iterate through symbol list
@@ -149,7 +151,7 @@ var adsConf = service.NewConfigSpec().
 	Field(service.NewStringField("routeUsername").Description("Username for UDP route registration on the PLC. If set, a route will be registered before connecting.").Default("")).
 	Field(service.NewStringField("routePassword").Description("Password for UDP route registration on the PLC.").Default("")).
 	Field(service.NewStringField("routeHostAddress").Description("The address the PLC should use to reach this client. Auto-detected from outbound connection if empty.").Default("")).
-	Field(service.NewStringListField("symbols").Description("List of symbols to read in the format 'function.name', e.g., 'MAIN.counter', '.globalCounter' " +
+Field(service.NewStringListField("symbols").Description("List of symbols to read in the format 'function.name', e.g., 'MAIN.counter', '.globalCounter' " +
 		"If using custom max delay and cycle time for a symbol the format is 'function.name:maxDelay:cycleTime', e.g,. 'MAIN.counter:0:100', '.globalCounter:100:10'"))
 
 func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchInput, error) {
@@ -349,8 +351,7 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 			if isLikelyContainerIP(hostAddr) {
 				g.log.Warnf("Auto-detected local IP '%s' appears to be a Docker/container-internal address. "+
 					"The PLC will likely not be able to reach this IP. "+
-					"Set 'routeHostAddress' to the Docker host IP and configure port forwarding "+
-					"(e.g. ports: ['48898:48898']) so the PLC can connect back to this client.", hostAddr)
+					"Set 'routeHostAddress' to an IP the PLC can reach, or use host_network/macvlan.", hostAddr)
 			}
 		}
 		sourceNetId := adsLib.StringToNetID(g.hostAMS)
