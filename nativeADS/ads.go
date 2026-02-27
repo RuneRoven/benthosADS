@@ -157,7 +157,69 @@ func (conn *Connection) GetUploadSymbolInfoDataTypes(length uint32) (data []byte
 	return data, nil
 }
 
-func (conn *Connection) AddSymbolNotification(symbolName string, maxDelay int, cycleTime int, updateReceiver chan *Update) error {
+// GetSymbolVersion reads the current symbol version from the PLC.
+func (conn *Connection) GetSymbolVersion() (uint32, error) {
+	data, err := conn.Read(uint32(GroupSymbolVersion), 0, 4)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read symbol version: %w", err)
+	}
+	if len(data) < 4 {
+		return 0, fmt.Errorf("symbol version response too short: %d bytes", len(data))
+	}
+	return binary.LittleEndian.Uint32(data), nil
+}
+
+// CheckSymbolVersion compares the current PLC symbol version against the stored version.
+// Returns true if the version has changed.
+func (conn *Connection) CheckSymbolVersion() (changed bool, err error) {
+	version, err := conn.GetSymbolVersion()
+	if err != nil {
+		return false, err
+	}
+	if version != conn.symbolVersion {
+		log.Info().
+			Uint32("old", conn.symbolVersion).
+			Uint32("new", version).
+			Msg("symbol version changed")
+		return true, nil
+	}
+	return false, nil
+}
+
+// RefreshSymbols reloads the symbol table if the symbol version has changed.
+// It releases old handles, reloads symbol/datatype tables, and re-acquires handles for active symbols.
+func (conn *Connection) RefreshSymbols() error {
+	changed, err := conn.CheckSymbolVersion()
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+
+	// Release old handles
+	conn.symbolLock.Lock()
+	for _, symbol := range conn.symbols {
+		if symbol.Handle != 0 {
+			handleBytes := make([]byte, 4)
+			binary.LittleEndian.PutUint32(handleBytes, symbol.Handle)
+			conn.Write(uint32(GroupSymbolReleaseHandle), 0, handleBytes)
+			symbol.Handle = 0
+		}
+	}
+	conn.symbolLock.Unlock()
+
+	// Reload symbols
+	err = conn.loadSymbols()
+	if err != nil {
+		return fmt.Errorf("failed to refresh symbols: %w", err)
+	}
+
+	log.Info().Uint32("version", conn.symbolVersion).Msg("symbols refreshed")
+	return nil
+}
+
+func (conn *Connection) AddSymbolNotification(symbolName string, maxDelay int, cycleTime int, transMode TransMode, updateReceiver chan *Update) error {
 	symbol, err := conn.GetSymbol(symbolName)
 	if err != nil {
 		log.
@@ -167,12 +229,11 @@ func (conn *Connection) AddSymbolNotification(symbolName string, maxDelay int, c
 			Msg("error getting symbol")
 		return err
 	}
-	fmt.Printf("%v\n", err)
 	handle, err := conn.AddDeviceNotification(
 		uint32(GroupSymbolValueByHandle),
 		symbol.Handle,
 		symbol.Length,
-		TransModeServerOnChange,
+		transMode,
 		time.Duration(maxDelay)*time.Millisecond,
 		time.Duration(cycleTime)*time.Millisecond)
 	if err != nil {
@@ -193,4 +254,141 @@ type Update struct {
 	Variable  string
 	Value     string
 	TimeStamp time.Time
+}
+
+// NotificationConfig holds configuration for a symbol notification, used for batch add and reconnect re-subscribe.
+type NotificationConfig struct {
+	SymbolName       string
+	MaxDelay         int
+	CycleTime        int
+	TransmissionMode TransMode
+}
+
+// ReadMultipleSymbols reads multiple symbols in a single ADS round-trip using SumRead.
+// Returns a map of symbol name to parsed string value.
+func (conn *Connection) ReadMultipleSymbols(names []string) (map[string]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+
+	// Resolve symbols and build SumRead requests
+	type symbolInfo struct {
+		name   string
+		symbol *Symbol
+	}
+	var infos []symbolInfo
+	var requests []SumReadRequest
+
+	for _, name := range names {
+		symbol, err := conn.GetSymbol(name)
+		if err != nil {
+			log.Error().Err(err).Str("symbol", name).Msg("error getting symbol for batch read")
+			continue
+		}
+		infos = append(infos, symbolInfo{name: name, symbol: symbol})
+		requests = append(requests, SumReadRequest{
+			Group:  uint32(GroupSymbolValueByHandle),
+			Offset: symbol.Handle,
+			Length: symbol.Length,
+		})
+	}
+
+	if len(requests) == 0 {
+		return nil, fmt.Errorf("no valid symbols found for batch read")
+	}
+
+	results, err := conn.SumRead(requests)
+	if err != nil {
+		return nil, fmt.Errorf("batch read failed: %w", err)
+	}
+
+	values := make(map[string]string, len(results))
+	conn.symbolLock.Lock()
+	defer conn.symbolLock.Unlock()
+
+	for i, result := range results {
+		if result.Error != ReturnCodeNoErrors {
+			log.Warn().
+				Str("symbol", infos[i].name).
+				Uint32("error", uint32(result.Error)).
+				Msg("symbol read error in batch")
+			continue
+		}
+		value, err := infos[i].symbol.parse(result.Data, 0)
+		if err != nil {
+			log.Error().Err(err).Str("symbol", infos[i].name).Msg("error parsing symbol in batch read")
+			continue
+		}
+		now := time.Now()
+		infos[i].symbol.LastUpdateTime = now
+		infos[i].symbol.Value = value
+		values[infos[i].name] = value
+	}
+
+	return values, nil
+}
+
+// AddSymbolNotifications adds multiple symbol notifications in a single ADS round-trip using SumAddDeviceNotification.
+func (conn *Connection) AddSymbolNotifications(configs []NotificationConfig, ch chan *Update) error {
+	if len(configs) == 0 {
+		return nil
+	}
+
+	// Resolve symbols and build requests
+	type symbolInfo struct {
+		config NotificationConfig
+		symbol *Symbol
+	}
+	var infos []symbolInfo
+	var requests []SumNotificationRequest
+
+	for _, cfg := range configs {
+		symbol, err := conn.GetSymbol(cfg.SymbolName)
+		if err != nil {
+			log.Error().Err(err).Str("symbol", cfg.SymbolName).Msg("error getting symbol for batch notification")
+			continue
+		}
+		infos = append(infos, symbolInfo{config: cfg, symbol: symbol})
+		requests = append(requests, SumNotificationRequest{
+			Group:            uint32(GroupSymbolValueByHandle),
+			Offset:           symbol.Handle,
+			Length:           symbol.Length,
+			TransmissionMode: cfg.TransmissionMode,
+			MaxDelay:         time.Duration(cfg.MaxDelay) * time.Millisecond,
+			CycleTime:        time.Duration(cfg.CycleTime) * time.Millisecond,
+		})
+	}
+
+	if len(requests) == 0 {
+		return fmt.Errorf("no valid symbols for batch notification add")
+	}
+
+	handles, errors, err := conn.SumAddDeviceNotification(requests)
+	if err != nil {
+		return fmt.Errorf("batch add notification failed: %w", err)
+	}
+
+	conn.symbolLock.Lock()
+	defer conn.symbolLock.Unlock()
+
+	for i, h := range handles {
+		if errors[i] != ReturnCodeNoErrors {
+			log.Error().
+				Str("symbol", infos[i].config.SymbolName).
+				Uint32("error", uint32(errors[i])).
+				Msg("error adding notification in batch")
+			continue
+		}
+		infos[i].symbol.Notification = ch
+		conn.activeNotifications[h] = infos[i].symbol
+		log.Info().
+			Uint32("handle", h).
+			Str("symbol", infos[i].config.SymbolName).
+			Msg("batch notification created")
+	}
+
+	// Store notification configs for reconnect
+	conn.notificationConfigs = append(conn.notificationConfigs, configs...)
+
+	return nil
 }

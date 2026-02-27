@@ -37,9 +37,9 @@ func (conn *Connection) ReadDeviceInfo() (response DeviceInfo, err error) {
 	}
 	respBuffer := bytes.NewBuffer(resp)
 	deviceInfoResponse := readDeviceInfoResponse{}
-	binary.Read(respBuffer, binary.LittleEndian, deviceInfoResponse)
+	binary.Read(respBuffer, binary.LittleEndian, &deviceInfoResponse)
 	if deviceInfoResponse.Error > 0 {
-		err = fmt.Errorf("got ADS error number %d in ReadDeviceInfo", deviceInfoResponse.Error)
+		err = fmt.Errorf("ADS error in ReadDeviceInfo: %v", deviceInfoResponse.Error)
 		return
 	}
 

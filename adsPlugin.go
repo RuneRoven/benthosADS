@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,6 +25,34 @@ type plcSymbol struct {
 func sanitize(s string) string {
 	re := regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 	return re.ReplaceAllString(s, "_")
+}
+
+// isLikelyContainerIP checks if an IP address looks like a Docker/container-internal
+// address that is probably not routable from an external PLC network.
+// Docker bridge networks typically use 172.17.0.0/16, 172.18-31.0.0/16, or 10.0.0.0/8.
+// Kubernetes pod networks commonly use 10.x.x.x or 100.64-127.x.x (CGNAT range).
+func isLikelyContainerIP(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	p := parsed.To4()
+	if p == nil {
+		return false
+	}
+	// Docker default bridge: 172.17.0.0/16
+	if p[0] == 172 && p[1] >= 17 && p[1] <= 31 {
+		return true
+	}
+	// Common container overlay/pod networks: 10.0.0.0/8
+	if p[0] == 10 {
+		return true
+	}
+	// CGNAT range used by some Kubernetes CNIs: 100.64.0.0/10
+	if p[0] == 100 && p[1] >= 64 && p[1] <= 127 {
+		return true
+	}
+	return false
 }
 func createSymbolList(s []string, defaultCycleTime int, defaultMaxDelay int, upperCase bool) []plcSymbol {
 	var newPlcSymbol []plcSymbol
@@ -84,12 +113,19 @@ type adsCommInput struct {
 	cycleTime        int                 // Read interval time if read type interval, cycle time if read type notification in milliseconds
 	maxDelay         int                 // Max delay time after value change before PLC should send message, in milliseconds
 	intervalTime     time.Duration       // Time duration before a connection attempt or read request times out.
+	requestTimeout   time.Duration       // Timeout for individual ADS requests.
 	handler          *adsLib.Connection  // TCP handler to manage the connection.
 	log              *service.Logger     // Logger for logging plugin activity.
 	symbols          []plcSymbol         // List of items to read from the PLC
 	deviceInfo       adsLib.DeviceInfo   // PLC device info
 	deviceSymbols    adsLib.Symbol       // Received symbols from PLC
 	notificationChan chan *adsLib.Update // notification channel for PLC data
+	transmissionMode adsLib.TransMode   // Notification transmission mode
+
+	// Route registration settings
+	routeUsername    string // If set, register a route before connecting
+	routePassword   string
+	routeHostAddress string // Address the PLC uses to reach this client (auto-detected if empty)
 }
 
 var adsConf = service.NewConfigSpec().
@@ -108,6 +144,11 @@ var adsConf = service.NewConfigSpec().
 	Field(service.NewIntField("intervalTime").Description("The interval time between reads milliseconds for read requests.").Default(1000)).
 	Field(service.NewBoolField("upperCase").Description("Convert symbol names to uppercase(needed on some older PLCs). Default true ").Default(true)).
 	Field(service.NewStringField("logLevel").Description("Log level for ADS connection. Default disabled").Default("disabled")).
+	Field(service.NewIntField("requestTimeout").Description("Timeout for individual ADS requests in milliseconds. Default 5000").Default(5000)).
+	Field(service.NewStringField("transmissionMode").Description("Notification transmission mode: serverOnChange (default), serverCycle, serverOnChange2, serverCycle2").Default("serverOnChange")).
+	Field(service.NewStringField("routeUsername").Description("Username for UDP route registration on the PLC. If set, a route will be registered before connecting.").Default("")).
+	Field(service.NewStringField("routePassword").Description("Password for UDP route registration on the PLC.").Default("")).
+	Field(service.NewStringField("routeHostAddress").Description("The address the PLC should use to reach this client. Auto-detected from outbound connection if empty.").Default("")).
 	Field(service.NewStringListField("symbols").Description("List of symbols to read in the format 'function.name', e.g., 'MAIN.counter', '.globalCounter' " +
 		"If using custom max delay and cycle time for a symbol the format is 'function.name:maxDelay:cycleTime', e.g,. 'MAIN.counter:0:100', '.globalCounter:100:10'"))
 
@@ -201,6 +242,44 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		return nil, err
 	}
 
+	requestTimeoutInt, err := conf.FieldInt("requestTimeout")
+	if err != nil {
+		return nil, err
+	}
+
+	transmissionModeStr, err := conf.FieldString("transmissionMode")
+	if err != nil {
+		return nil, err
+	}
+	var transmissionMode adsLib.TransMode
+	switch transmissionModeStr {
+	case "serverOnChange":
+		transmissionMode = adsLib.TransModeServerOnChange
+	case "serverCycle":
+		transmissionMode = adsLib.TransModeServerCycle
+	case "serverOnChange2":
+		transmissionMode = adsLib.TransModeServerOnChange2
+	case "serverCycle2":
+		transmissionMode = adsLib.TransModeServerCycle2
+	default:
+		transmissionMode = adsLib.TransModeServerOnChange
+	}
+
+	routeUsername, err := conf.FieldString("routeUsername")
+	if err != nil {
+		return nil, err
+	}
+
+	routePassword, err := conf.FieldString("routePassword")
+	if err != nil {
+		return nil, err
+	}
+
+	routeHostAddress, err := conf.FieldString("routeHostAddress")
+	if err != nil {
+		return nil, err
+	}
+
 	symbolList := createSymbolList(symbols, maxDelay, cycleTime, upperCase)
 	m := &adsCommInput{
 		targetIP:         targetIP,
@@ -215,7 +294,12 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		symbols:          symbolList,
 		log:              mgr.Logger(),
 		intervalTime:     time.Duration(timeoutInt) * time.Millisecond,
+		requestTimeout:   time.Duration(requestTimeoutInt) * time.Millisecond,
 		notificationChan: make(chan *adsLib.Update),
+		transmissionMode: transmissionMode,
+		routeUsername:     routeUsername,
+		routePassword:     routePassword,
+		routeHostAddress:  routeHostAddress,
 	}
 
 	return service.AutoRetryNacksBatched(m), nil
@@ -241,10 +325,42 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 	// Create a new connection
 	g.log.Infof("Creating new connection")
 	var err error
-	g.handler, err = adsLib.NewConnection(ctx, g.targetIP, g.targetPort, g.targetAMS, g.runtimePort, g.hostAMS, g.hostPort)
+	g.handler, err = adsLib.NewConnection(ctx, g.targetIP, g.targetPort, g.targetAMS, g.runtimePort, g.hostAMS, g.hostPort, g.requestTimeout)
 	if err != nil {
 		g.log.Errorf("Failed to create connection: %v", err)
 		return err
+	}
+
+	// Register route if configured
+	if g.routeUsername != "" {
+		hostAddr := g.routeHostAddress
+		if hostAddr == "" {
+			// Auto-detect: dial TCP briefly to discover local IP
+			tmpConn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(g.targetIP, fmt.Sprintf("%d", g.targetPort)), 5*time.Second)
+			if dialErr != nil {
+				g.log.Errorf("Failed to auto-detect local address: %v", dialErr)
+				return dialErr
+			}
+			hostAddr = tmpConn.LocalAddr().(*net.TCPAddr).IP.String()
+			tmpConn.Close()
+
+			// Warn if the detected IP looks like a Docker/container-internal address
+			// that is likely not routable from the PLC network
+			if isLikelyContainerIP(hostAddr) {
+				g.log.Warnf("Auto-detected local IP '%s' appears to be a Docker/container-internal address. "+
+					"The PLC will likely not be able to reach this IP. "+
+					"Set 'routeHostAddress' to the Docker host IP and configure port forwarding "+
+					"(e.g. ports: ['48898:48898']) so the PLC can connect back to this client.", hostAddr)
+			}
+		}
+		sourceNetId := adsLib.StringToNetID(g.hostAMS)
+		routeName := fmt.Sprintf("benthosADS-%s", hostAddr)
+		g.log.Infof("Registering route on PLC: %s -> %s", routeName, hostAddr)
+		err = adsLib.AddRemoteRoute(g.targetIP, sourceNetId, routeName, hostAddr, g.routeUsername, g.routePassword)
+		if err != nil {
+			g.log.Errorf("Failed to register route: %v", err)
+			return err
+		}
 	}
 
 	// Connect to the PLC
@@ -269,43 +385,64 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 	if g.readType == "notification" {
 		g.log.Infof("wait 2s to establish connection before adding notifications")
 		time.Sleep(2 * time.Second)
-		// Add symbol notifications
-		for _, symbol := range g.symbols {
-			g.log.Infof("Adding symbol notification for %s", symbol.name)
-			g.handler.AddSymbolNotification(symbol.name, symbol.maxDelay, symbol.cycleTime, g.notificationChan)
+
+		// Build notification configs for batch add
+		configs := make([]adsLib.NotificationConfig, len(g.symbols))
+		for i, symbol := range g.symbols {
+			configs[i] = adsLib.NotificationConfig{
+				SymbolName:       symbol.name,
+				MaxDelay:         symbol.maxDelay,
+				CycleTime:        symbol.cycleTime,
+				TransmissionMode: g.transmissionMode,
+			}
 		}
+		err = g.handler.AddSymbolNotifications(configs, g.notificationChan)
+		if err != nil {
+			g.log.Errorf("Batch add notifications failed: %v", err)
+			return err
+		}
+
 		g.log.Infof("wait 1s after adding notifications")
 		time.Sleep(1 * time.Second)
 	}
 	if g.readType != "notification" {
-		g.log.Infof("wait 3s to establish connection")
+		g.log.Infof("wait 2s to establish connection")
 		time.Sleep(2 * time.Second)
 	}
 	return nil
 }
 
 func (g *adsCommInput) ReadBatchPull(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
-	g.log.Infof("ReadBatchPull called")
+	g.log.Debugf("ReadBatchPull called")
 	if g.handler == nil {
 		return nil, nil, errors.New("client is nil")
 	}
-	//
+
+	// Collect symbol names for batch read
+	names := make([]string, len(g.symbols))
+	for i, symbol := range g.symbols {
+		names[i] = symbol.name
+	}
+
+	values, err := g.handler.ReadMultipleSymbols(names)
+	if err != nil {
+		g.log.Errorf("Batch read failed: %v", err)
+		return nil, nil, err
+	}
 
 	msgs := service.MessageBatch{}
-
 	for _, symbol := range g.symbols {
-		b := make([]byte, 0)
-		g.log.Infof("reading symbol  %s", symbol.name)
-		res, _ := g.handler.ReadFromSymbol(symbol.name)
-		b = append(b, []byte(res)...)
-		valueMsg := service.NewMessage(b)
+		val, ok := values[symbol.name]
+		if !ok {
+			continue
+		}
+		valueMsg := service.NewMessage([]byte(val))
 		valueMsg.MetaSet("symbol_name", sanitize(symbol.name))
-
 		msgs = append(msgs, valueMsg)
 	}
+
 	time.Sleep(g.intervalTime)
 	return msgs, func(ctx context.Context, err error) error {
-		// Nacks are retried automatically when we use service.AutoRetryNacks
 		return nil
 	}, nil
 }

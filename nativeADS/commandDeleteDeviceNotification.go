@@ -14,7 +14,7 @@ func (conn *Connection) DeleteDeviceNotification(handle uint32) error {
 	defer conn.waitGroup.Done()
 	request := &bytes.Buffer{}
 	type deleteNotificationCommandPacket struct {
-		handle uint32
+		Handle uint32
 	}
 	var content = deleteNotificationCommandPacket{
 		handle,
@@ -39,7 +39,7 @@ func (conn *Connection) DeleteDeviceNotification(handle uint32) error {
 			Int("handle", int(handle)).
 			Int("error", int(adsError)).
 			Msg("error deleting handle")
-		err = fmt.Errorf("got ADS error number %d in DeleteDeviceNotification", adsError)
+		err = fmt.Errorf("ADS error in DeleteDeviceNotification: %v", adsError)
 		return err
 	}
 	// close(conn.activeNotifications[handle])

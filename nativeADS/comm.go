@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -50,9 +49,11 @@ func (conn *Connection) sendRequest(command CommandID, data []byte) (response []
 	conn.waitGroup.Add(1)
 	defer conn.waitGroup.Done()
 	if conn == nil {
-		log.Error().
-			Msg("Failed to encode header, connection is nil pointer")
+		log.Error().Msg("Failed to encode header, connection is nil pointer")
 		return
+	}
+	if conn.disconnected.Load() {
+		return nil, ErrDisconnected
 	}
 	conn.activeRequestLock.Lock()
 	// First, request a new invoke id
@@ -60,6 +61,11 @@ func (conn *Connection) sendRequest(command CommandID, data []byte) (response []
 	// Create a channel for the response
 	conn.activeRequests[id] = make(chan []byte)
 	conn.activeRequestLock.Unlock()
+	defer func() {
+		conn.activeRequestLock.Lock()
+		delete(conn.activeRequests, id)
+		conn.activeRequestLock.Unlock()
+	}()
 	log.Trace().
 		Interface("command", command).
 		Bytes("data", data).
@@ -73,7 +79,7 @@ func (conn *Connection) sendRequest(command CommandID, data []byte) (response []
 			Msg("Error during sendrequest encode")
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(conn.ctx, 4000*time.Millisecond)
+	ctx, cancel := context.WithTimeout(conn.ctx, conn.RequestTimeout)
 	defer cancel()
 	select {
 	case <-ctx.Done():
@@ -104,7 +110,9 @@ func (conn *Connection) sendRequest(command CommandID, data []byte) (response []
 
 func (conn *Connection) listen() <-chan []byte {
 	c := make(chan []byte)
+	conn.waitGroup.Add(1)
 	go func() {
+		defer conn.waitGroup.Done()
 		defer close(c)
 		reader := bufio.NewReader(conn.connection)
 		buff := bytes.Buffer{}
@@ -113,24 +121,26 @@ func (conn *Connection) listen() <-chan []byte {
 			data := make([]byte, 6)
 			select {
 			case <-conn.ctx.Done():
-				log.Info().
-					Msgf("exit listen")
+				log.Info().Msg("exit listen")
 				return
 			default:
 				_, err := io.ReadFull(reader, data)
 				if err != nil {
-					log.Info().
-						Err(err).
-						Msg("listen read error")
+					select {
+					case <-conn.ctx.Done():
+						// Shutdown was requested, don't reconnect
+						return
+					default:
+					}
+					log.Error().Err(err).Msg("listen read error, triggering reconnect")
+					go conn.Reconnect()
 					return
 				}
 			}
 			buff.Write(data)
 			err := binary.Read(&buff, binary.LittleEndian, &tcpHeader)
 			if err != nil {
-				log.Error().
-					Err(err).
-					Msg("error during header read")
+				log.Error().Err(err).Msg("error during header read")
 				continue
 			}
 			data = make([]byte, tcpHeader.Length)
@@ -140,9 +150,13 @@ func (conn *Connection) listen() <-chan []byte {
 			default:
 				_, err := io.ReadFull(reader, data)
 				if err != nil {
-					log.Info().
-						Err(err).
-						Msg("listen read error")
+					select {
+					case <-conn.ctx.Done():
+						return
+					default:
+					}
+					log.Error().Err(err).Msg("listen body read error, triggering reconnect")
+					go conn.Reconnect()
 					return
 				}
 			}

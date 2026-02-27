@@ -57,7 +57,7 @@ func (conn *Connection) Read(group uint32, offset uint32, length uint32) (data [
 		return
 	}
 	if response.Error > 0 {
-		err = fmt.Errorf("got ADS error number %v in Read", response.Error)
+		err = fmt.Errorf("ADS error in Read: %v", response.Error)
 		return
 	}
 	// data = make([]byte, response.Length)

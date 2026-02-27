@@ -25,6 +25,11 @@ type amsHeader struct {
 	InvokeID  uint32
 }
 
+// StringToNetID converts a dotted notation NetID string (e.g. "192.168.1.1.1.1") to a 6-byte array.
+func StringToNetID(source string) (result [6]byte) {
+	return stringToNetID(source)
+}
+
 func stringToNetID(source string) (result [6]byte) {
 	splitLocalhost := strings.Split(source, ".")
 
@@ -74,7 +79,7 @@ func (conn *Connection) encode(command CommandID, data []byte, invokeID uint32) 
 	if err != nil {
 		log.Error().
 			Err(err).
-			Msg("binary.Write failed: %s")
+			Msg("binary.Write failed")
 		return nil, err
 	}
 

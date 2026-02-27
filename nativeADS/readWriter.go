@@ -74,9 +74,7 @@ func (symbol *Symbol) parse(data []byte, offset int) (string, error) {
 			if stop-start != 2 {
 				return "", fmt.Errorf("INT Size Wrong")
 			}
-			buf := bytes.NewBuffer(data)
 			var i int16
-			binary.Read(buf, binary.LittleEndian, &i)
 			i = int16(binary.LittleEndian.Uint16(data[start:stop]))
 			newValue = strconv.FormatInt(int64(i), 10)
 		case "DINT":
@@ -294,30 +292,6 @@ func (symbol *Symbol) writeToNode(value string, offset int, datatypes map[string
 		newBuf := make([]byte, symbol.Length)
 		copy(newBuf, []byte(value))
 		buf.Write(newBuf)
-	/*case "TIME":
-		if stop-start != 4 {return}
-		i := binary.LittleEndian.Uint32(data[start:stop])
-		t := time.Unix(0, int64(uint64(i)*uint64(time.Millisecond))-int64(time.Hour) )
-
-		newValue = t.Truncate(time.Millisecond).Format("15:04:05.999999999")
-	case "TOD":
-		if stop-start != 4 {return}
-		i := binary.LittleEndian.Uint32(data[start:stop])
-		t := time.Unix(0, int64(uint64(i)*uint64(time.Millisecond))-int64(time.Hour) )
-
-		newValue = t.Truncate(time.Millisecond).Format("15:04")
-	case "DATE":
-		if stop-start != 4 {return}
-		i := binary.LittleEndian.Uint32(data[start:stop])
-		t := time.Unix(0, int64(uint64(i)*uint64(time.Second)) )
-
-		newValue = t.Truncate(time.Millisecond).Format("2006-01-02")
-	case "DT":
-		if stop-start != 4 {return}
-		i := binary.LittleEndian.Uint32(data[start:stop])
-		t := time.Unix(0, int64(uint64(i)*uint64(time.Second))-int64(time.Hour) )
-
-		newValue = t.Truncate(time.Millisecond).Format("2006-01-02 15:04:05")*/
 	default:
 		err = fmt.Errorf("datatype '%s' write is not implemented yet", symbol.DataType)
 		return

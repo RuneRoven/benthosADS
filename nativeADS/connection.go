@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"go.uber.org/atomic"
@@ -36,29 +37,46 @@ type Connection struct {
 	activeRequests    map[uint32]chan []byte
 
 	systemResponse chan []byte
+
+	RequestTimeout time.Duration
+
+	// Stored notification configs for re-subscribe after reconnect
+	notificationConfigs []NotificationConfig
+	notificationChannel chan *Update
+
+	// Symbol version tracking
+	symbolVersion uint32
+
+	// Reconnection settings
+	reconnectInterval    time.Duration
+	maxReconnectAttempts int // 0 = infinite
+	isLocal              bool
+	disconnected         atomic.Bool
 }
 
-// type requestResponse struct {
-// 	id       atomic.Uint32
-// 	response map[uint32]chan []byte
-// }
 
-// NewConnection blah blah blah
-func NewConnection(ctx context.Context, ip string, port int, netid string, amsPort int, localNetID string, localPort int) (conn *Connection, err error) {
-	conn = &Connection{ip: ip, port: port}
-	conn.ip = ip
-	conn.port = port
+// NewConnection creates a new ADS connection. requestTimeout is the timeout for individual ADS requests.
+// If requestTimeout is 0, a default of 5000ms is used.
+func NewConnection(ctx context.Context, ip string, port int, netid string, amsPort int, localNetID string, localPort int, requestTimeout time.Duration) (conn *Connection, err error) {
+	if requestTimeout <= 0 {
+		requestTimeout = 5000 * time.Millisecond
+	}
+	conn = &Connection{
+		ip:                   ip,
+		port:                 port,
+		RequestTimeout:       requestTimeout,
+		reconnectInterval:    5 * time.Second,
+		maxReconnectAttempts: 10,
+	}
 	conn.target.NetID = stringToNetID(netid)
 	conn.target.Port = uint16(amsPort)
-	conn.source.NetID = stringToNetID(localNetID)
+	if localNetID != "auto" && localNetID != "" {
+		conn.source.NetID = stringToNetID(localNetID)
+	}
+	// If localNetID is "auto" or empty, source.NetID stays zero and will be auto-derived in Connect()
 	conn.source.Port = uint16(localPort)
 	conn.systemResponse = make(chan []byte)
 	conn.activeRequests = map[uint32]chan []byte{}
-	// for i := CommandID(0); i < 10; i++ {
-	// 	conn.activeRequests[i] = &requestResponse{
-	// 		response: map[uint32]chan []byte{},
-	// 	}
-	// }
 	conn.activeNotifications = make(map[uint32]*Symbol)
 	conn.sendChannel = make(chan []byte)
 	conn.ctx, conn.shutdown = context.WithCancel(ctx)
@@ -66,24 +84,34 @@ func NewConnection(ctx context.Context, ip string, port int, netid string, amsPo
 }
 
 func (conn *Connection) Connect(local bool) error {
+	conn.isLocal = local
 	var err error
-	log.Info().
-		Msg("TEsting DEBUG!")
 	log.Debug().
-		Msgf("Dailing ip: %s NetID: %d", conn.ip, conn.port)
+		Msgf("Dialing ip: %s port: %d", conn.ip, conn.port)
 	if local {
 		conn.target.NetID = [6]byte{127, 0, 0, 1, 1, 1}
 		conn.ip = "127.0.0.1"
 	}
-	conn.connection, err = net.Dial("tcp", fmt.Sprintf("%s:%d", conn.ip, conn.port))
+	conn.connection, err = net.Dial("tcp", net.JoinHostPort(conn.ip, fmt.Sprintf("%d", conn.port)))
 	if err != nil {
 		log.Error().
 			Err(err).
 			Msg("Error connecting")
 		return err
 	}
-	log.Trace().
-		Msgf("Connected")
+	// Auto-derive source AMS NetID from local IP if source NetID is all zeros
+	if conn.source.NetID == [6]byte{} {
+		localAddr := conn.connection.LocalAddr().(*net.TCPAddr)
+		ip := localAddr.IP.To4()
+		if ip != nil {
+			conn.source.NetID = [6]byte{ip[0], ip[1], ip[2], ip[3], 1, 1}
+			log.Info().
+				Str("netid", fmt.Sprintf("%d.%d.%d.%d.1.1", ip[0], ip[1], ip[2], ip[3])).
+				Msg("auto-derived source AMS NetID from local IP")
+		}
+	}
+
+	log.Trace().Msgf("Connected")
 	go conn.listen()
 	go conn.transmitWorker()
 	if local {
@@ -101,52 +129,39 @@ func (conn *Connection) Connect(local bool) error {
 		}
 		conn.source = result
 	}
-	res, err := conn.GetSymbolUploadInfo()
+	err = conn.loadSymbols()
 	if err != nil {
-		log.Error().
-			Err(err).
-			Msgf("ERROR %v", err)
+		log.Error().Err(err).Msg("failed to load symbols during connect")
+		return err
 	}
-	datatypesResponse, err := conn.GetUploadSymbolInfoDataTypes(res.DataTypeLength)
-	if err != nil {
-		log.Error().
-			Err(err).
-			Msgf("ERROR %v", err)
-	}
-	datatypes, err := ParseUploadSymbolInfoDataTypes(datatypesResponse)
-	if err != nil {
-		log.Error().
-			Err(err).
-			Msgf("ERROR %v", err)
-	}
-	conn.datatypes = datatypes
-	symbolsResponse, err := conn.GetUploadSymbolInfoSymbols(res.SymbolLength)
-	if err != nil {
-		log.Error().
-			Err(err).
-			Msgf("ERROR %v", err)
-	}
-	symbols, err := ParseUploadSymbolInfoSymbols(symbolsResponse, datatypes)
-	if err != nil {
-		log.Error().
-			Err(err).
-			Msgf("ERROR %v", err)
-	}
-	conn.symbols = symbols
 	return nil
 }
 
 // Close closes connection and waits for completion
 func (conn *Connection) Close() {
-	log.Info().
-		Msg("CLOSE is called")
-	log.Info().
-		Msg("Sending shutdown to workers")
+	log.Info().Msg("Close called, shutting down")
+
+	// Batch delete all active notifications
+	handles := make([]uint32, 0, len(conn.activeNotifications))
 	for handle := range conn.activeNotifications {
-		conn.DeleteDeviceNotification(handle)
-		log.Info().
-			Uint32("handle", handle).
-			Msg("Removed Notification handle")
+		handles = append(handles, handle)
+	}
+	if len(handles) > 0 {
+		errors, err := conn.SumDeleteDeviceNotification(handles)
+		if err != nil {
+			log.Warn().Err(err).Msg("batch delete notifications failed, falling back to individual deletes")
+			for _, handle := range handles {
+				conn.DeleteDeviceNotification(handle)
+			}
+		} else {
+			for i, h := range handles {
+				if errors[i] != ReturnCodeNoErrors {
+					log.Warn().Uint32("handle", h).Uint32("error", uint32(errors[i])).Msg("failed to delete notification handle")
+				} else {
+					log.Info().Uint32("handle", h).Msg("removed notification handle")
+				}
+			}
+		}
 	}
 	for _, symbol := range conn.symbols {
 		if symbol.Handle != 0 {
@@ -165,4 +180,117 @@ func (conn *Connection) Close() {
 	log.Info().
 		Msg("Close DONE")
 	conn.connection.Close()
+}
+
+// ErrDisconnected is returned when attempting to send on a closed connection.
+var ErrDisconnected = fmt.Errorf("connection is disconnected")
+
+// Reconnect attempts to re-establish the TCP connection, reload symbols,
+// and re-subscribe to previously registered notifications.
+func (conn *Connection) Reconnect() error {
+	log.Info().Msg("attempting reconnect")
+	conn.disconnected.Store(true)
+
+	// Close existing TCP connection if still open
+	if conn.connection != nil {
+		conn.connection.Close()
+	}
+
+	// Cancel old goroutines and wait
+	conn.shutdown()
+	conn.waitGroup.Wait()
+
+	// Reset context
+	parentCtx := context.Background()
+	conn.ctx, conn.shutdown = context.WithCancel(parentCtx)
+
+	// Reset channels
+	conn.sendChannel = make(chan []byte)
+	conn.systemResponse = make(chan []byte)
+	conn.activeRequests = map[uint32]chan []byte{}
+	conn.activeNotifications = make(map[uint32]*Symbol)
+
+	var lastErr error
+	attempts := 0
+	for {
+		attempts++
+		if conn.maxReconnectAttempts > 0 && attempts > conn.maxReconnectAttempts {
+			return fmt.Errorf("reconnect failed after %d attempts: %w", conn.maxReconnectAttempts, lastErr)
+		}
+
+		var err error
+		conn.connection, err = net.Dial("tcp", net.JoinHostPort(conn.ip, fmt.Sprintf("%d", conn.port)))
+		if err != nil {
+			lastErr = err
+			log.Warn().Err(err).Int("attempt", attempts).Msg("reconnect dial failed, retrying")
+			time.Sleep(conn.reconnectInterval)
+			continue
+		}
+
+		// Re-start goroutines
+		go conn.listen()
+		go conn.transmitWorker()
+
+		// Re-load symbols
+		err = conn.loadSymbols()
+		if err != nil {
+			lastErr = err
+			log.Warn().Err(err).Int("attempt", attempts).Msg("reconnect symbol load failed, retrying")
+			conn.connection.Close()
+			time.Sleep(conn.reconnectInterval)
+			continue
+		}
+
+		// Re-subscribe notifications
+		if len(conn.notificationConfigs) > 0 && conn.notificationChannel != nil {
+			err = conn.AddSymbolNotifications(conn.notificationConfigs, conn.notificationChannel)
+			if err != nil {
+				log.Warn().Err(err).Msg("reconnect notification re-subscribe failed")
+			}
+		}
+
+		conn.disconnected.Store(false)
+		log.Info().Int("attempts", attempts).Msg("reconnect successful")
+		return nil
+	}
+}
+
+// loadSymbols loads symbol table and datatypes from the PLC, and saves the symbol version.
+func (conn *Connection) loadSymbols() error {
+	// Read and store symbol version
+	version, err := conn.GetSymbolVersion()
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to read symbol version, continuing with symbol load")
+	} else {
+		conn.symbolVersion = version
+	}
+
+	res, err := conn.GetSymbolUploadInfo()
+	if err != nil {
+		return fmt.Errorf("failed to get symbol upload info: %w", err)
+	}
+	datatypesResponse, err := conn.GetUploadSymbolInfoDataTypes(res.DataTypeLength)
+	if err != nil {
+		return fmt.Errorf("failed to upload datatypes: %w", err)
+	}
+	datatypes, err := ParseUploadSymbolInfoDataTypes(datatypesResponse)
+	if err != nil {
+		return fmt.Errorf("failed to parse datatypes: %w", err)
+	}
+	conn.datatypes = datatypes
+	symbolsResponse, err := conn.GetUploadSymbolInfoSymbols(res.SymbolLength)
+	if err != nil {
+		return fmt.Errorf("failed to upload symbols: %w", err)
+	}
+	symbols, err := ParseUploadSymbolInfoSymbols(symbolsResponse, datatypes)
+	if err != nil {
+		return fmt.Errorf("failed to parse symbols: %w", err)
+	}
+	conn.symbols = symbols
+	return nil
+}
+
+// IsDisconnected returns whether the connection is currently in a disconnected state.
+func (conn *Connection) IsDisconnected() bool {
+	return conn.disconnected.Load()
 }
