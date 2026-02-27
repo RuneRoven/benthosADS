@@ -16,6 +16,8 @@ func (conn *Connection) AddDeviceNotification(
 	transmissionMode TransMode,
 	maxDelay time.Duration,
 	cycleTime time.Duration) (handle uint32, err error) {
+	conn.waitGroup.Add(1)
+	defer conn.waitGroup.Done()
 	request := new(bytes.Buffer)
 	type addDeviceNotificationCommandPacket struct {
 		Group            uint32
