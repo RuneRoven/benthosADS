@@ -19,13 +19,10 @@ input:
     targetPort: 48898               # Port of the target internal gateway
     runtimePort: 801                # Runtime port of PLC system
     hostAMS: '192.168.56.1.1.1'     # Host AMS net ID. Usually the IP address + .1.1
-    hostPort: 10500                 # Host port
     readType: 'interval'            # Read type, interval or notification
     maxDelay: 100                   # Max delay for sending notifications in ms
     cycleTime: 100                  # Cycle time for notification handler in ms
     intervalTime: 1000              # Interval time for reading in ms
-    requestTimeout: 5000            # Timeout for individual ADS requests in ms
-    transmissionMode: 'serverOnChange'  # Notification transmission mode
     upperCase: true                 # Convert symbol names to all uppercase for older PLCS
     logLevel: "disabled"            # Log level for ADS connection
     symbols:                        # List of symbols to read from
@@ -58,15 +55,85 @@ There are basically 3 ways for setting up the connection:
 
 1. **TwinCAT Connection Manager**: Use the TwinCAT connection manager locally on the host, scan for the device and add a connection using the correct credentials for the PLC.
 2. **Static route on PLC**: Log in to the PLC using the TwinCAT system manager and add a static route from the PLC to the client. This is the preferred way when using benthos on a Kubernetes cluster since you have no good way of installing the connection manager.
-3. **Automatic route registration (UDP)**: Use the `routeUsername` and `routePassword` config fields to have the plugin automatically register a route on the PLC before connecting. See the [Route Registration](#route-registration-docker--kubernetes) section below.
+3. **Automatic route registration (UDP)**: Use the `routeUsername` and `routePassword` config fields to have the plugin automatically register a route on the PLC before connecting. See the [Route Registration](#route-registration) section below.
+
+#### Docker and Kubernetes
+
+ADS works from inside Docker containers with default bridge networking — **no `host_network`, no port forwarding, and no open ports are needed**. All ADS traffic (requests, responses, and notifications) flows over a single outbound TCP connection to port 48898. The PLC never initiates connections back to the client; it sends all responses and notifications on the same TCP socket the client opened.
+
+The only requirement is that the `hostAMS` value matches a route registered on the PLC. When running in Docker with bridge networking:
+- **`routeHostAddress` must be set** to the Docker host's IP on the PLC network (e.g. `192.168.1.50`). This tells the PLC which IP address to associate with the route. If left empty, it auto-detects the container's bridge IP which is not routable from the PLC.
+- **`hostAMS` can be set explicitly** to `routeHostAddress` + `.1.1` (e.g. `192.168.1.50.1.1`), or left as `auto` — when route registration is configured with `routeHostAddress`, `auto` will correctly derive the AMS NetID from `routeHostAddress` instead of the container's bridge IP.
+- **A route must exist on the PLC** for the `hostAMS` NetID. This can be added manually in TwinCAT System Manager, or automatically via the `routeUsername`/`routePassword` config fields.
+- **`hostPort` is optional** (default 10500). It is a logical AMS port used in protocol headers, not a network port. Any value works.
+
+**Option A: Automatic route registration (recommended)**
+
+The plugin registers a route on the PLC automatically via UDP before connecting. No manual PLC configuration needed:
+
+```yaml
+input:
+  ads:
+    targetIP: '192.168.1.100'
+    targetAMS: '192.168.1.100.1.1'
+    runtimePort: 851
+    hostAMS: 'auto'                      # Derives AMS NetID from routeHostAddress
+    routeUsername: 'Administrator'        # Triggers automatic route registration
+    routePassword: '1'
+    routeHostAddress: '192.168.1.50'     # Docker HOST IP (required in bridge networking)
+    readType: 'notification'
+    symbols:
+      - "MAIN.MyVariable"
+```
+
+You can also set `hostAMS` explicitly if you prefer:
+
+```yaml
+    hostAMS: '192.168.1.50.1.1'          # Explicit: Docker HOST IP + .1.1
+    routeHostAddress: '192.168.1.50'     # Must match
+```
+
+**Option B: Static route on PLC**
+
+If you prefer not to use automatic registration, add a static route on the PLC via TwinCAT System Manager pointing to the Docker host's IP. Then configure `hostAMS` to match — no `routeUsername`/`routePassword` needed:
+
+```yaml
+input:
+  ads:
+    targetIP: '192.168.1.100'
+    targetAMS: '192.168.1.100.1.1'
+    runtimePort: 851
+    hostAMS: '192.168.1.50.1.1'         # Must match the route on the PLC
+    readType: 'notification'
+    symbols:
+      - "MAIN.MyVariable"
+```
+
+**Option C: host_network or macvlan**
+
+When the container has a routable IP on the PLC network, `hostAMS: auto` works without `routeHostAddress`:
+
+```yaml
+input:
+  ads:
+    targetIP: '192.168.1.100'
+    targetAMS: '192.168.1.100.1.1'
+    runtimePort: 851
+    hostAMS: 'auto'                     # Auto-derive from container's real IP
+    routeUsername: 'Administrator'       # Optional: auto-register route
+    routePassword: '1'
+    readType: 'notification'
+    symbols:
+      - "MAIN.MyVariable"
+```
 
 #### Configuration Parameters
 - **targetIP**: IP address of the PLC
 - **targetAMS**: AMS net ID of the target
-- **targetPort**: Port of the target internal gateway
+- **targetPort**: Port of the target internal gateway (default 48898)
 - **runtimePort**: Runtime port of PLC system, 800 to 899. TwinCAT 2 uses 800-850 and TwinCAT 3 is recommended to use 851-899. TwinCAT 2 usually has 801 as default and TwinCAT 3 uses 851
-- **hostAMS**: Host AMS net ID. Usually the IP address + `.1.1`. Use `auto` to automatically derive it from the outbound TCP connection's local IP address. This is useful in Docker/Kubernetes where the container IP may not be known in advance
-- **hostPort**: Host port
+- **hostAMS**: Host AMS net ID. Usually the IP address + `.1.1`. Must match a route on the PLC. Use `auto` (default) to automatically derive it — when `routeHostAddress` is set, derives from that address; otherwise derives from the outbound connection's local IP
+- **hostPort**: AMS source port used in protocol headers. This is a logical port, not a network port. Any arbitrary value works (default 10500)
 - **readType**: Read type for the symbols. `interval` means benthos reads all symbols at a specified interval and `notification` is a function in the PLC where benthos sends a notification request to the PLC and the PLC adds the symbol to its internal notification system and sends data whenever there is a change
 - **maxDelay**: Default max delay for sending notifications in ms. Sets a maximum time for how long after the change the PLC must send the notification
 - **cycleTime**: Default cycle time for notification handler in ms. Tells the notification handler how often to scan for changes. For symbols like triggers that are only true or false for 1 PLC cycle it can be necessary to use a low value
@@ -75,9 +142,9 @@ There are basically 3 ways for setting up the connection:
 - **transmissionMode**: Notification transmission mode (default `serverOnChange`). Only applies when `readType` is `notification` — ignored for `interval` mode since it uses plain ADS Read commands instead. See [Transmission Modes](#transmission-modes) below
 - **upperCase**: Converts symbol names to all uppercase for older PLCs. For TwinCAT 2 this is often necessary
 - **logLevel**: Log level for ADS connection. Sets the log level of the internal log function for the underlying ads library. When set to `debug` or `trace`, ADS error codes will be shown with human-readable descriptions (e.g. `0x0710: symbol not found` instead of just `1808`)
-- **routeUsername**: Username for automatic UDP route registration on the PLC. If set, a route will be registered before connecting. See [Route Registration](#route-registration-docker--kubernetes)
+- **routeUsername**: Username for automatic UDP route registration on the PLC. If set, a route will be registered before connecting. See [Route Registration](#route-registration)
 - **routePassword**: Password for automatic UDP route registration on the PLC
-- **routeHostAddress**: The IP address/hostname the PLC should use to connect back to this client. Auto-detected from the outbound connection if left empty
+- **routeHostAddress**: The IP address the PLC associates with the route. When running in Docker with bridge networking, this must be set to the Docker host's IP on the PLC network. When `hostAMS` is `auto`, the AMS NetID is also derived from this address. Auto-detected from the outbound connection if left empty (only correct with `host_network` or macvlan)
 - **symbols**: List of symbols to read from in the format `function.variable:maxDelay:cycleTime`, e.g. `MAIN.MYTRIGGER:0:10` is a variable in the main program with 0ms max delay and 10ms cycle time, `MAIN.MYBOOL` is a variable in the main program with no extra arguments so it will use the default max delay and cycle time. `.superDuperInt` is a global variable with no extra arguments. All global variables must start with a `.` e.g. `.someStrangeVar`
 
 #### Transmission Modes
@@ -90,113 +157,51 @@ The `transmissionMode` field controls how the PLC's internal notification handle
 |------|-------|-------------|
 | `serverOnChange` | 4 | **(Default)** The PLC scans for changes at the configured `cycleTime` interval and sends a notification only when the value has changed. This is the most efficient mode for most use cases. |
 | `serverCycle` | 3 | The PLC sends the current value at every `cycleTime` interval, regardless of whether the value has changed. Useful when you need a constant data stream or heartbeat. |
-| `serverOnChange2` | 6 | Enhanced version of `serverOnChange` available on newer TwinCAT 3 firmware. Supports more efficient internal handling on the PLC side. Falls back gracefully if not supported. |
-| `serverCycle2` | 5 | Enhanced version of `serverCycle` available on newer TwinCAT 3 firmware. Same behavior as `serverCycle` but with improved internal efficiency. Falls back gracefully if not supported. |
+| `serverOnChange2` | 6 | Enhanced version of `serverOnChange` available on newer TwinCAT 3 firmware. Supports more efficient internal handling on the PLC side. **Automatically falls back** to `serverOnChange` on older PLCs. |
+| `serverCycle2` | 5 | Enhanced version of `serverCycle` available on newer TwinCAT 3 firmware. Same behavior as `serverCycle` but with improved internal efficiency. **Automatically falls back** to `serverCycle` on older PLCs. |
 
 **Choosing a mode:**
 - Use `serverOnChange` (default) for event-driven data where you only care about changes
 - Use `serverCycle` when you need periodic snapshots regardless of changes
-- Use the `2` variants (`serverOnChange2`, `serverCycle2`) only if you are running TwinCAT 3 build 4024+ and want reduced PLC overhead. Older PLCs will return an error code `0x0713: ADS TransMode not supported` if these modes are not available
+- The `2` variants (`serverOnChange2`, `serverCycle2`) can be used safely on any PLC — the plugin automatically detects older PLCs and falls back to the v1 equivalent
 
 ```yaml
 input:
   ads:
     transmissionMode: 'serverOnChange'   # default, sends only on value change
     # transmissionMode: 'serverCycle'    # sends at every cycle regardless of change
-    # transmissionMode: 'serverOnChange2' # enhanced, TwinCAT 3 only
-    # transmissionMode: 'serverCycle2'    # enhanced cyclic, TwinCAT 3 only
+    # transmissionMode: 'serverOnChange2' # enhanced, auto-falls back on older PLCs
+    # transmissionMode: 'serverCycle2'    # enhanced cyclic, auto-falls back on older PLCs
 ```
 
-#### Route Registration (Docker / Kubernetes)
+#### Route Registration
 
-When running in Docker containers or Kubernetes pods (without `host_network`), the container has its own internal IP address that the PLC doesn't know about. The ADS protocol requires a **bidirectional route** — the PLC needs to know how to send packets back to the client.
-
-The plugin can automatically register a route on the PLC using the Beckhoff UDP route protocol (port 48899). This removes the need to manually add routes in the TwinCAT System Manager for each client.
+The plugin can automatically register a route on the PLC using the Beckhoff UDP route protocol (port 48899). This removes the need to manually add routes in the TwinCAT System Manager.
 
 **How it works:**
 1. Before establishing the TCP connection, the plugin sends a UDP route registration packet to port 48899 on the PLC
-2. The packet tells the PLC: "To reach AMS NetID X, send TCP packets to IP address Y"
-3. The PLC adds this as a temporary route in its route table
+2. The packet tells the PLC: "Associate AMS NetID X with IP address Y"
+3. The PLC adds this as a runtime route (may not be visible in TwinCAT System Manager)
 4. The normal ADS TCP connection is then established over port 48898
 
-**Understanding the Docker NAT problem:**
+Setting `routeUsername` activates automatic route registration. If route registration fails (e.g. UDP response lost due to NAT), the plugin logs a warning and still attempts the TCP connection — the route may have been created despite the missing response.
 
-ADS is bidirectional — the PLC must be able to initiate TCP connections _back_ to the client. With Docker bridge networking, your container has an internal IP (e.g. `172.17.0.2`) that is **not reachable** from the PLC network. Outbound packets from the container get NAT'd to the Docker host IP, but the PLC has no way to reach the container's internal IP.
-
-This means auto-detection of `routeHostAddress` will **not work** with default Docker bridge networking, because it discovers the container-internal IP. The plugin will log a warning if it detects this situation.
-
-You have three options:
-
-| Setup | How it works | Complexity |
-|-------|-------------|------------|
-| **Port forwarding** (recommended) | Forward port 48898 on the Docker host to the container. Set `routeHostAddress` to the Docker host IP. The PLC connects to the host, Docker NAT forwards to the container. | Low |
-| **Macvlan / ipvlan network** | Give the container a real IP on the PLC network. Auto-detection works correctly. No port forwarding needed. | Medium |
-| **`host_network: true`** | Container shares the host's network stack. Auto-detection works, but you lose container network isolation. Route registration is still useful to avoid manual PLC configuration. | Low |
-
-**Configuration (port forwarding setup):**
-
-```yaml
-# docker-compose.yml
-services:
-  benthos:
-    image: your-benthos-image
-    ports:
-      - "48898:48898"    # Forward ADS port so PLC can connect back
-```
-
-```yaml
-# benthos.yaml
-input:
-  ads:
-    targetIP: '192.168.1.100'
-    targetAMS: '192.168.1.100.1.1'
-    targetPort: 48898
-    runtimePort: 851
-    hostAMS: '192.168.1.50.1.1'         # Use the Docker HOST IP + .1.1
-    hostPort: 10500
-    routeUsername: 'Administrator'       # PLC admin username (triggers route registration)
-    routePassword: '1'                  # PLC admin password
-    routeHostAddress: '192.168.1.50'    # Docker HOST IP (not the container IP!)
-    # ... rest of config
-```
-
-In this example, `192.168.1.50` is the Docker host's IP on the PLC network. The PLC will connect to `192.168.1.50:48898`, and Docker's port forwarding will route it to the container.
-
-**Configuration (macvlan / host_network):**
-
-When the container has a real IP on the PLC network (macvlan, ipvlan, or host_network), auto-detection works correctly:
-
-```yaml
-input:
-  ads:
-    targetIP: '192.168.1.100'
-    targetAMS: '192.168.1.100.1.1'
-    targetPort: 48898
-    runtimePort: 851
-    hostAMS: 'auto'                     # auto-derive from container's real IP
-    hostPort: 10500
-    routeUsername: 'Administrator'
-    routePassword: '1'
-    routeHostAddress: ''                # auto-detect works here
-    # ... rest of config
-```
-
-**Parameters explained:**
-
-- `routeUsername` / `routePassword`: The credentials of the PLC administrator account. These are the same credentials you would use in the TwinCAT System Manager to add a route. Setting `routeUsername` activates the automatic route registration.
-- `routeHostAddress`: The IP address or hostname that the PLC should use to connect back to this client. **This must be an IP that the PLC can actually reach.** If left empty, it is auto-detected from the outbound connection's local IP — but this only works when the container has a routable IP (macvlan, host_network). With Docker bridge networking, you **must** set this to the Docker host IP and configure port forwarding.
-- `hostAMS`: When set to `auto`, the AMS NetID is derived from the local IP of the outbound TCP connection (e.g. if local IP is `10.0.0.5`, the AMS NetID becomes `10.0.0.5.1.1`). When using port forwarding, set this explicitly to match the `routeHostAddress` (e.g. `192.168.1.50.1.1`).
+**Parameters:**
+- `routeUsername` / `routePassword`: PLC administrator credentials. Same as used in TwinCAT System Manager to add routes
+- `routeHostAddress`: The IP address the PLC associates with this client. In Docker with bridge networking, this must be set to the Docker host's IP on the PLC network. When `hostAMS` is `auto`, the AMS NetID is derived from this address. Auto-detected if empty (only correct with `host_network` or macvlan)
 
 **Network requirements:**
 - UDP port 48899 must be reachable on the PLC from the client (for route registration)
-- TCP port 48898 must be reachable on the PLC from the client (outbound — usually works through any NAT)
-- TCP port 48898 must be reachable on the client from the PLC (inbound — requires port forwarding with Docker bridge, or a routable container IP)
+- TCP port 48898 must be reachable on the PLC from the client (outbound — works through any NAT)
 
-**Kubernetes example:**
-In Kubernetes, pods get cluster-internal IPs that are not routable from the PLC network. You need to either:
-- Use a `NodePort` service exposing port 48898 and set `routeHostAddress` to the node IP
-- Use `hostNetwork: true` in the pod spec
-- Use a CNI plugin that assigns routable IPs to pods (e.g. Calico with BGP peering to the PLC network)
+#### Reconnection
+
+The plugin automatically reconnects when the TCP connection is lost (e.g. network cable unplugged, PLC restart). Aggressive TCP keepalive probes detect dead connections within ~13 seconds. On reconnect, the plugin:
+1. Re-establishes the TCP connection (retries indefinitely with 5s interval)
+2. Reloads the symbol table from the PLC
+3. Re-subscribes all notification handles
+
+No manual intervention is needed.
 
 #### Output
 
@@ -205,6 +210,16 @@ This outputs for each address a single message with the payload being the value 
 ## Testing
 
 Tested and verified:
-#### cx1020, TwinCAT 2
-- Read batches, Add notifications, different cycle times and max delay.
+#### CX7000, TwinCAT 3
+- Notifications from Docker container with bridge networking (no host_network)
+- Automatic UDP route registration from Docker bridge networking
+- Static route with explicit hostAMS (no route registration)
+- Reconnection after network loss with automatic notification re-subscribe
+- Sum/batch commands for read, add notification, and delete notification
+
+#### CX1020, TwinCAT 2
+- Read batches, Add notifications, different cycle times and max delay
 - Different datatypes, INT, INT16, UINT, DINT, BOOL, STRUCT, and more
+- Automatic fallback from sum commands to individual calls
+- Automatic fallback from v2 transmission modes to v1
+- Reconnection after network loss with automatic notification re-subscribe

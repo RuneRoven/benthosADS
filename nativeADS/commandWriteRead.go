@@ -9,8 +9,6 @@ import (
 )
 
 func (conn *Connection) WriteRead(group uint32, offset uint32, readLength uint32, send []byte) (data []byte, err error) {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
 	request := bytes.NewBuffer([]byte{})
 	type writeReadCommandPacket struct {
 		Group       uint32

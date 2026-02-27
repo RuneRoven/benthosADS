@@ -10,8 +10,6 @@ import (
 
 // Write - ADS command id: 3
 func (conn *Connection) Write(group uint32, offset uint32, data []byte) error {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
 	type writeCommandPacket struct {
 		Group  uint32
 		Offset uint32
@@ -30,7 +28,7 @@ func (conn *Connection) Write(group uint32, offset uint32, data []byte) error {
 			Msgf("binary.Write failed: %s", err)
 		return err
 	}
-	binary.Write(request, binary.LittleEndian, data)
+	err = binary.Write(request, binary.LittleEndian, data)
 	if err != nil {
 		log.Error().
 			Msgf("binary.Write failed: %s", err)

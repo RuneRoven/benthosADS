@@ -80,15 +80,15 @@ func buildRoutePacket(localNetId [6]byte, routeName string, computerName string,
 		tagsData = append(tagsData, tag...)
 	}
 
-	// Header: cookie(4) + invokeId(4) + serviceId(4) + tagCount(4) + AmsAddr(8)
+	// Header: cookie(4) + invokeId(4) + serviceId(4) + AmsAddr(8) + tagCount(4)
 	header := make([]byte, 24)
 	binary.LittleEndian.PutUint32(header[0:], routeCookie)
 	binary.LittleEndian.PutUint32(header[4:], 0) // invokeId
 	binary.LittleEndian.PutUint32(header[8:], routeServiceAdd)
-	binary.LittleEndian.PutUint32(header[12:], uint32(len(tags)))
-	// AmsAddr: NetID(6) + Port(2)
-	copy(header[16:22], localNetId[:])
-	binary.LittleEndian.PutUint16(header[22:], uint16(PortR0Plc))
+	// AmsAddr: NetID(6) + Port(2) — port is 0 per Beckhoff spec
+	copy(header[12:18], localNetId[:])
+	binary.LittleEndian.PutUint16(header[18:], 0)
+	binary.LittleEndian.PutUint32(header[20:], uint32(len(tags)))
 
 	return append(header, tagsData...)
 }
@@ -108,8 +108,9 @@ func appendNull(data []byte) []byte {
 }
 
 // parseRouteResponse validates the route registration response.
+// Response format: cookie(4) + invokeId(4) + serviceId(4) + AmsAddr(8) + tagCount(4) + tags...
 func parseRouteResponse(data []byte) error {
-	if len(data) < 16 {
+	if len(data) < 24 {
 		return fmt.Errorf("route response too short: %d bytes", len(data))
 	}
 
@@ -119,13 +120,14 @@ func parseRouteResponse(data []byte) error {
 	}
 
 	serviceId := binary.LittleEndian.Uint32(data[8:])
-	if serviceId != routeServiceAdd {
-		return fmt.Errorf("unexpected route response serviceId: %d", serviceId)
+	// Response serviceId has the RESPONSE flag (0x80000000) set
+	if serviceId != (0x80000000 | routeServiceAdd) {
+		return fmt.Errorf("unexpected route response serviceId: 0x%08X", serviceId)
 	}
 
-	// Parse tags to find error code
-	tagCount := binary.LittleEndian.Uint32(data[12:])
-	offset := 16
+	// Skip AmsAddr (8 bytes at offset 12), tagCount is at offset 20
+	tagCount := binary.LittleEndian.Uint32(data[20:])
+	offset := 24
 	for i := uint32(0); i < tagCount && offset+4 <= len(data); i++ {
 		tid := binary.LittleEndian.Uint16(data[offset:])
 		tlen := binary.LittleEndian.Uint16(data[offset+2:])

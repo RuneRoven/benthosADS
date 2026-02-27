@@ -52,6 +52,10 @@ type Connection struct {
 	maxReconnectAttempts int // 0 = infinite
 	isLocal              bool
 	disconnected         atomic.Bool
+
+	// Feature support flags (detected at runtime)
+	sumReadSupported atomic.Bool
+	sumReadChecked   atomic.Bool
 }
 
 
@@ -66,7 +70,7 @@ func NewConnection(ctx context.Context, ip string, port int, netid string, amsPo
 		port:                 port,
 		RequestTimeout:       requestTimeout,
 		reconnectInterval:    5 * time.Second,
-		maxReconnectAttempts: 10,
+		maxReconnectAttempts: 0, // 0 = infinite retries
 	}
 	conn.target.NetID = stringToNetID(netid)
 	conn.target.Port = uint16(amsPort)
@@ -79,7 +83,9 @@ func NewConnection(ctx context.Context, ip string, port int, netid string, amsPo
 	conn.activeRequests = map[uint32]chan []byte{}
 	conn.activeNotifications = make(map[uint32]*Symbol)
 	conn.sendChannel = make(chan []byte)
-	conn.ctx, conn.shutdown = context.WithCancel(ctx)
+	// Use an independent context so that Close() can still send cleanup commands
+	// even after the parent context is canceled (e.g. on SIGTERM)
+	conn.ctx, conn.shutdown = context.WithCancel(context.Background())
 	return
 }
 
@@ -98,6 +104,18 @@ func (conn *Connection) Connect(local bool) error {
 			Err(err).
 			Msg("Error connecting")
 		return err
+	}
+	// Enable aggressive TCP keepalive to detect dead connections quickly.
+	// With Idle=3s, Interval=2s, Count=5: connection declared dead after ~13s of no response.
+	// This ensures cable unplugs (>13s) are detected and trigger reconnect,
+	// while not affecting slow-changing notification data (keepalive is TCP-level, not app-level).
+	if tcpConn, ok := conn.connection.(*net.TCPConn); ok {
+		tcpConn.SetKeepAliveConfig(net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     3 * time.Second,
+			Interval: 2 * time.Second,
+			Count:    5,
+		})
 	}
 	// Auto-derive source AMS NetID from local IP if source NetID is all zeros
 	if conn.source.NetID == [6]byte{} {
@@ -141,7 +159,7 @@ func (conn *Connection) Connect(local bool) error {
 func (conn *Connection) Close() {
 	log.Info().Msg("Close called, shutting down")
 
-	// Batch delete all active notifications
+	// Delete all active notifications (uses sum command with automatic fallback to individual)
 	handles := make([]uint32, 0, len(conn.activeNotifications))
 	for handle := range conn.activeNotifications {
 		handles = append(handles, handle)
@@ -149,10 +167,7 @@ func (conn *Connection) Close() {
 	if len(handles) > 0 {
 		errors, err := conn.SumDeleteDeviceNotification(handles)
 		if err != nil {
-			log.Warn().Err(err).Msg("batch delete notifications failed, falling back to individual deletes")
-			for _, handle := range handles {
-				conn.DeleteDeviceNotification(handle)
-			}
+			log.Warn().Err(err).Msg("failed to delete notification handles during close")
 		} else {
 			for i, h := range handles {
 				if errors[i] != ReturnCodeNoErrors {
@@ -174,12 +189,15 @@ func (conn *Connection) Close() {
 		}
 	}
 	conn.shutdown()
+	// Close the TCP connection to unblock listen() which may be stuck in ReadFull
+	if conn.connection != nil {
+		conn.connection.Close()
+	}
 	log.Info().
 		Msg("Waiting for workers to close")
 	conn.waitGroup.Wait()
 	log.Info().
 		Msg("Close DONE")
-	conn.connection.Close()
 }
 
 // ErrDisconnected is returned when attempting to send on a closed connection.
@@ -201,14 +219,14 @@ func (conn *Connection) Reconnect() error {
 	conn.waitGroup.Wait()
 
 	// Reset context
-	parentCtx := context.Background()
-	conn.ctx, conn.shutdown = context.WithCancel(parentCtx)
+	conn.ctx, conn.shutdown = context.WithCancel(context.Background())
 
-	// Reset channels
+	// Reset channels, feature flags, and active notifications (old handles are invalid)
 	conn.sendChannel = make(chan []byte)
 	conn.systemResponse = make(chan []byte)
 	conn.activeRequests = map[uint32]chan []byte{}
 	conn.activeNotifications = make(map[uint32]*Symbol)
+	conn.sumReadChecked.Store(false)
 
 	var lastErr error
 	attempts := 0
@@ -226,6 +244,14 @@ func (conn *Connection) Reconnect() error {
 			time.Sleep(conn.reconnectInterval)
 			continue
 		}
+		// Enable TCP keepalive to detect dead connections
+		if tcpConn, ok := conn.connection.(*net.TCPConn); ok {
+			tcpConn.SetKeepAlive(true)
+			tcpConn.SetKeepAlivePeriod(5 * time.Second)
+		}
+
+		// Clear disconnected flag so sendRequest works during symbol load
+		conn.disconnected.Store(false)
 
 		// Re-start goroutines
 		go conn.listen()
@@ -235,15 +261,25 @@ func (conn *Connection) Reconnect() error {
 		err = conn.loadSymbols()
 		if err != nil {
 			lastErr = err
+			conn.disconnected.Store(true)
 			log.Warn().Err(err).Int("attempt", attempts).Msg("reconnect symbol load failed, retrying")
+			// Stop goroutines before next attempt
+			conn.shutdown()
 			conn.connection.Close()
+			conn.waitGroup.Wait()
+			conn.ctx, conn.shutdown = context.WithCancel(context.Background())
+			conn.sendChannel = make(chan []byte)
+			conn.systemResponse = make(chan []byte)
+			conn.activeRequests = map[uint32]chan []byte{}
 			time.Sleep(conn.reconnectInterval)
 			continue
 		}
 
-		// Re-subscribe notifications
+		// Re-subscribe notifications using stored configs (don't re-append)
 		if len(conn.notificationConfigs) > 0 && conn.notificationChannel != nil {
-			err = conn.AddSymbolNotifications(conn.notificationConfigs, conn.notificationChannel)
+			savedConfigs := conn.notificationConfigs
+			conn.notificationConfigs = nil // Clear before re-adding to prevent duplicates
+			err = conn.AddSymbolNotifications(savedConfigs, conn.notificationChannel)
 			if err != nil {
 				log.Warn().Err(err).Msg("reconnect notification re-subscribe failed")
 			}

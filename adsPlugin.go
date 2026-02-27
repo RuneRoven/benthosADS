@@ -139,7 +139,7 @@ var adsConf = service.NewConfigSpec().
 	Field(service.NewIntField("targetPort").Description("Target port. Default 48898 (Twincat 2)").Default(48898)).
 	Field(service.NewIntField("runtimePort").Description("Target runtime port. Default 801(Twincat 2)").Default(801)).
 	Field(service.NewStringField("hostAMS").Description("The host AMS net ID, use auto (default) to automatically derive AMS from host IP. Enter manually if auto not working").Default("auto")).
-	Field(service.NewIntField("hostPort").Description("Host port. Default 48898 (Twincat 2)").Default(10500)).
+	Field(service.NewIntField("hostPort").Description("AMS source port used in protocol headers. This is a logical port, not a network port. Any arbitrary value works.").Default(10500)).
 	Field(service.NewStringField("readType").Description("Read type, interval or notification (default)").Default("notification")).
 	Field(service.NewIntField("maxDelay").Description("Max delay time after value change before PLC should send message, in milliseconds. Default 100").Default(100)).
 	Field(service.NewIntField("cycleTime").Description("Requested read interval time for PLC to scan for changes if read type notification, in milliseconds.").Default(1000)).
@@ -337,30 +337,42 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 	if g.routeUsername != "" {
 		hostAddr := g.routeHostAddress
 		if hostAddr == "" {
-			// Auto-detect: dial TCP briefly to discover local IP
-			tmpConn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(g.targetIP, fmt.Sprintf("%d", g.targetPort)), 5*time.Second)
+			// Auto-detect local IP using UDP (doesn't require PLC to accept the connection)
+			udpConn, dialErr := net.Dial("udp4", net.JoinHostPort(g.targetIP, "48899"))
 			if dialErr != nil {
 				g.log.Errorf("Failed to auto-detect local address: %v", dialErr)
 				return dialErr
 			}
-			hostAddr = tmpConn.LocalAddr().(*net.TCPAddr).IP.String()
-			tmpConn.Close()
-
-			// Warn if the detected IP looks like a Docker/container-internal address
-			// that is likely not routable from the PLC network
-			if isLikelyContainerIP(hostAddr) {
-				g.log.Warnf("Auto-detected local IP '%s' appears to be a Docker/container-internal address. "+
-					"The PLC will likely not be able to reach this IP. "+
-					"Set 'routeHostAddress' to an IP the PLC can reach, or use host_network/macvlan.", hostAddr)
-			}
+			hostAddr = udpConn.LocalAddr().(*net.UDPAddr).IP.String()
+			udpConn.Close()
 		}
-		sourceNetId := adsLib.StringToNetID(g.hostAMS)
+
+		// Determine the AMS NetID for route registration.
+		// When hostAMS is "auto", derive from routeHostAddress (or auto-detected hostAddr)
+		// so that route registration works correctly in Docker bridge networking.
+		amsForRoute := g.hostAMS
+		if amsForRoute == "auto" || amsForRoute == "" {
+			if isLikelyContainerIP(hostAddr) {
+				g.log.Warnf("Auto-detected IP %s looks like a container IP. Set routeHostAddress to the Docker host's IP for route registration to work.", hostAddr)
+			}
+			amsForRoute = hostAddr + ".1.1"
+			// Also update hostAMS so the ADS connection uses the same NetID
+			g.hostAMS = amsForRoute
+			// Re-create the connection with the correct source NetID
+			g.handler, err = adsLib.NewConnection(ctx, g.targetIP, g.targetPort, g.targetAMS, g.runtimePort, g.hostAMS, g.hostPort, g.requestTimeout)
+			if err != nil {
+				g.log.Errorf("Failed to re-create connection with derived hostAMS: %v", err)
+				return err
+			}
+			g.log.Infof("Derived hostAMS from routeHostAddress: %s", amsForRoute)
+		}
+
+		sourceNetId := adsLib.StringToNetID(amsForRoute)
 		routeName := fmt.Sprintf("benthosADS-%s", hostAddr)
-		g.log.Infof("Registering route on PLC: %s -> %s", routeName, hostAddr)
+		g.log.Infof("Registering route on PLC %s: name=%s, clientIP=%s, amsNetId=%s", g.targetIP, routeName, hostAddr, amsForRoute)
 		err = adsLib.AddRemoteRoute(g.targetIP, sourceNetId, routeName, hostAddr, g.routeUsername, g.routePassword)
 		if err != nil {
-			g.log.Errorf("Failed to register route: %v", err)
-			return err
+			g.log.Warnf("Route registration failed (will attempt TCP connection anyway): %v", err)
 		}
 	}
 
@@ -453,12 +465,13 @@ func (g *adsCommInput) ReadBatchNotification(ctx context.Context) (service.Messa
 	var res *adsLib.Update
 	select {
 	case res = <-g.notificationChan:
-		// Successfully received an update
+		if res == nil {
+			// Channel was closed, shutting down
+			return nil, nil, service.ErrEndOfInput
+		}
 	case <-ctx.Done():
-		// Context canceled, return an error or handle accordingly
-		return nil, nil, fmt.Errorf("context canceled")
-	case <-time.After(10 * time.Second): // Add a timeout to avoid blocking indefinitely
-		// Handle timeout, e.g., return an error or empty message
+		return nil, nil, ctx.Err()
+	case <-time.After(10 * time.Second):
 		return nil, nil, fmt.Errorf("timeout waiting for update")
 	}
 	msgs := service.MessageBatch{}
@@ -486,12 +499,13 @@ func (g *adsCommInput) ReadBatch(ctx context.Context) (service.MessageBatch, ser
 func (g *adsCommInput) Close(ctx context.Context) error {
 	g.log.Infof("Close called")
 	if g.handler != nil {
-		g.log.Infof("Closing down")
-		if g.notificationChan != nil {
-			close(g.notificationChan)
-		}
+		g.log.Infof("Closing down, cleaning up PLC handles")
 		g.handler.Close()
 		g.handler = nil
+	}
+	if g.notificationChan != nil {
+		close(g.notificationChan)
+		g.notificationChan = nil
 	}
 
 	return nil

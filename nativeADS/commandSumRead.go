@@ -28,6 +28,11 @@ func (conn *Connection) SumRead(requests []SumReadRequest) ([]SumReadResult, err
 		return nil, nil
 	}
 
+	// Skip SumRead if we already know it's not supported
+	if conn.sumReadChecked.Load() && !conn.sumReadSupported.Load() {
+		return conn.sumReadFallback(requests)
+	}
+
 	n := len(requests)
 
 	// Build write data: N × 12 bytes (group + offset + length per request)
@@ -45,8 +50,17 @@ func (conn *Connection) SumRead(requests []SumReadRequest) ([]SumReadResult, err
 
 	resp, err := conn.WriteRead(uint32(GroupSumupReadEx2), uint32(n), readLen, writeData)
 	if err != nil {
-		log.Warn().Err(err).Msg("SumRead failed, falling back to individual reads")
+		if !conn.sumReadChecked.Load() {
+			log.Warn().Err(err).Msg("SumRead not supported by PLC, using individual reads")
+			conn.sumReadSupported.Store(false)
+			conn.sumReadChecked.Store(true)
+		}
 		return conn.sumReadFallback(requests)
+	}
+
+	if !conn.sumReadChecked.Load() {
+		conn.sumReadSupported.Store(true)
+		conn.sumReadChecked.Store(true)
 	}
 
 	if len(resp) < n*8 {

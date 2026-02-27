@@ -28,9 +28,6 @@ type NotificationSample struct {
 
 // DeviceNotification - ADS command id: 8
 func (conn *Connection) DeviceNotification(ctx context.Context, in []byte) error {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
-
 	var stream NotificationStream
 	var header StampHeader
 	var sample NotificationSample

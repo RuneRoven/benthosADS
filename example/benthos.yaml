@@ -1,22 +1,22 @@
 ---
 input:
     ads:
-      targetIP: '192.168.3.70' # IP address 
-      targetAMS: '5.3.69.134.1.1'   
-      targetPort: 48898                     
-      runtimePort: 801                  
-      hostAMS: '192.168.3.152.1.1'       
-      hostPort: 10500  
-      readType: 'interval'   
-      maxDelay: 100        
+      targetIP: '192.168.3.70' # IP address
+      targetAMS: '5.3.69.134.1.1'
+      targetPort: 48898
+      runtimePort: 801
+      hostAMS: '192.168.3.152.1.1'
+      hostPort: 10500
+      readType: 'interval'
+      maxDelay: 100
       cycleTime: 100
       intervalTime: 1000
       upperCase: true
       logLevel: "trace"
       symbols:               # List of addresses to read from
         - "MAIN.MYBOOL"     # Accesses a bool
-        - "MAIN.MYTRIGGER:0:10"  
-        - "MAIN.SPEEDOS"  
+        - "MAIN.MYTRIGGER:0:10"
+        - "MAIN.SPEEDOS"
         - ".superDuperInt"
         - ".someStrangeVar"
 

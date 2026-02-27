@@ -46,6 +46,19 @@ func (tm TransMode) String() string {
 	}
 }
 
+// downgradeTransMode converts v2 transmission modes to their v1 equivalents
+// for older PLCs (e.g. TwinCAT 2) that silently ignore v2 modes.
+func downgradeTransMode(mode TransMode) TransMode {
+	switch mode {
+	case TransModeServerOnChange2:
+		return TransModeServerOnChange
+	case TransModeServerCycle2:
+		return TransModeServerCycle
+	default:
+		return mode
+	}
+}
+
 type AdsState uint16
 
 const (

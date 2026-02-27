@@ -123,25 +123,31 @@ func (conn *Connection) ReadFromSymbol(symbolName string) (string, error) {
 }
 
 func (conn *Connection) GetSymbolUploadInfo() (uploadInfo SymbolUploadInfo, err error) {
-	res, err := conn.Read(uint32(GroupSymbolUploadInfo2), 0, 24) //UploadSymbolInfo;
+	// Try extended info (0xF00F) first, fall back to basic info (0xF00C)
+	res, err := conn.Read(uint32(GroupSymbolUploadInfo2), 0, 24)
 	if err != nil {
-		log.Fatal().
-			Err(err).
-			Msg("Bad Bad Bad")
-		return
+		log.Debug().Err(err).Msg("GroupSymbolUploadInfo2 not supported, falling back to GroupSymbolUploadInfo")
+		res, err = conn.Read(uint32(GroupSymbolUploadInfo), 0, 16)
+		if err != nil {
+			return uploadInfo, fmt.Errorf("GetSymbolUploadInfo failed: %w", err)
+		}
 	}
 	buff := bytes.NewBuffer(res)
-	binary.Read(buff, binary.LittleEndian, &uploadInfo)
+	binary.Read(buff, binary.LittleEndian, &uploadInfo.SymbolCount)
+	binary.Read(buff, binary.LittleEndian, &uploadInfo.SymbolLength)
+	binary.Read(buff, binary.LittleEndian, &uploadInfo.DataTypeCount)
+	binary.Read(buff, binary.LittleEndian, &uploadInfo.DataTypeLength)
+	if buff.Len() >= 8 {
+		binary.Read(buff, binary.LittleEndian, &uploadInfo.ExtraCount)
+		binary.Read(buff, binary.LittleEndian, &uploadInfo.ExtraLength)
+	}
 	return
 }
 
 func (conn *Connection) GetUploadSymbolInfoSymbols(length uint32) (data []byte, err error) {
 	res, err := conn.Read(uint32(GroupSymbolUpload), 0, length) //UploadSymbolInfo;
 	if err != nil {
-		log.Fatal().
-			Err(err).
-			Msg("Bad Bad Bad")
-		return nil, err
+		return nil, fmt.Errorf("GetUploadSymbolInfoSymbols failed: %w", err)
 	}
 	return res, nil
 }
@@ -387,8 +393,9 @@ func (conn *Connection) AddSymbolNotifications(configs []NotificationConfig, ch 
 			Msg("batch notification created")
 	}
 
-	// Store notification configs for reconnect
+	// Store notification configs and channel for reconnect
 	conn.notificationConfigs = append(conn.notificationConfigs, configs...)
+	conn.notificationChannel = ch
 
 	return nil
 }
