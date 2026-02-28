@@ -29,7 +29,7 @@ type Connection struct {
 	datatypes map[string]SymbolUploadDataType
 	ctx       context.Context
 	shutdown  context.CancelFunc
-	waitGroup sync.WaitGroup
+	waitGroup sync.WaitGroup // tracks only infrastructure goroutines (listen, transmitWorker)
 
 	// List of active requests that waits a response, invokeid is key and value is a channel to the request rutine
 	currentRequest    atomic.Uint32

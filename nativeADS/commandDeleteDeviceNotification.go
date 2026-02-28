@@ -10,8 +10,6 @@ import (
 
 // DeleteDeviceNotification does stuff
 func (conn *Connection) DeleteDeviceNotification(handle uint32) error {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
 	request := &bytes.Buffer{}
 	type deleteNotificationCommandPacket struct {
 		Handle uint32

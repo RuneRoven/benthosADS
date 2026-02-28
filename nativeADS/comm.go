@@ -13,8 +13,6 @@ import (
 )
 
 func (conn *Connection) send(data []byte) (response []byte, err error) {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
 	conn.currentRequest.Inc()
 	ctx, cancel := context.WithCancel(conn.ctx)
 	defer cancel()
@@ -46,8 +44,6 @@ func (conn *Connection) send(data []byte) (response []byte, err error) {
 }
 
 func (conn *Connection) sendRequest(command CommandID, data []byte) (response []byte, err error) {
-	conn.waitGroup.Add(1)
-	defer conn.waitGroup.Done()
 	if conn == nil {
 		log.Error().Msg("Failed to encode header, connection is nil pointer")
 		return
