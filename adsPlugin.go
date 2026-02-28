@@ -378,6 +378,20 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 			// Older PLCs (TwinCAT 2) may need this delay.
 			time.Sleep(1 * time.Second)
 		}
+
+		// Check for IP mismatch between registered route and actual TCP source
+		tcpProbe, probeErr := net.DialTimeout("tcp",
+			net.JoinHostPort(g.targetIP, fmt.Sprintf("%d", g.targetPort)),
+			3*time.Second)
+		if probeErr == nil {
+			actualIP := tcpProbe.LocalAddr().(*net.TCPAddr).IP.String()
+			tcpProbe.Close()
+			if actualIP != hostAddr {
+				g.log.Warnf("Route registered with hostAddress=%s but TCP connections originate from a different IP. "+
+					"Some PLCs (especially TwinCAT 2) validate that the TCP source IP matches the route and will reject the connection. "+
+					"Set routeHostAddress to the IP that the PLC sees as the TCP source.", hostAddr)
+			}
+		}
 	}
 
 	// Connect to the PLC
