@@ -110,6 +110,8 @@ func appendNull(data []byte) []byte {
 // parseRouteResponse validates the route registration response.
 // Response format: cookie(4) + invokeId(4) + serviceId(4) + AmsAddr(8) + tagCount(4) + tags...
 func parseRouteResponse(data []byte) error {
+	log.Debug().Hex("response", data).Int("length", len(data)).Msg("route response raw bytes")
+
 	if len(data) < 24 {
 		return fmt.Errorf("route response too short: %d bytes", len(data))
 	}
@@ -127,10 +129,12 @@ func parseRouteResponse(data []byte) error {
 
 	// Skip AmsAddr (8 bytes at offset 12), tagCount is at offset 20
 	tagCount := binary.LittleEndian.Uint32(data[20:])
+	log.Debug().Uint32("tagCount", tagCount).Msg("route response tags")
 	offset := 24
 	for i := uint32(0); i < tagCount && offset+4 <= len(data); i++ {
 		tid := binary.LittleEndian.Uint16(data[offset:])
 		tlen := binary.LittleEndian.Uint16(data[offset+2:])
+		log.Debug().Uint16("tagId", tid).Uint16("tagLen", tlen).Hex("tagData", data[offset+4:offset+4+int(tlen)]).Msg("route response tag")
 		offset += 4
 		if offset+int(tlen) > len(data) {
 			break

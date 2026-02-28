@@ -56,6 +56,8 @@ type Connection struct {
 	// Feature support flags (detected at runtime)
 	sumReadSupported atomic.Bool
 	sumReadChecked   atomic.Bool
+
+	reconnecting atomic.Bool // prevents concurrent reconnect attempts
 }
 
 
@@ -206,6 +208,13 @@ var ErrDisconnected = fmt.Errorf("connection is disconnected")
 // Reconnect attempts to re-establish the TCP connection, reload symbols,
 // and re-subscribe to previously registered notifications.
 func (conn *Connection) Reconnect() error {
+	// Prevent concurrent reconnect attempts
+	if !conn.reconnecting.CompareAndSwap(false, true) {
+		log.Info().Msg("reconnect already in progress, skipping")
+		return nil
+	}
+	defer conn.reconnecting.Store(false)
+
 	log.Info().Msg("attempting reconnect")
 	conn.disconnected.Store(true)
 
@@ -265,7 +274,9 @@ func (conn *Connection) Reconnect() error {
 			log.Warn().Err(err).Int("attempt", attempts).Msg("reconnect symbol load failed, retrying")
 			// Stop goroutines before next attempt
 			conn.shutdown()
-			conn.connection.Close()
+			if conn.connection != nil {
+				conn.connection.Close()
+			}
 			conn.waitGroup.Wait()
 			conn.ctx, conn.shutdown = context.WithCancel(context.Background())
 			conn.sendChannel = make(chan []byte)

@@ -373,6 +373,10 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 		err = adsLib.AddRemoteRoute(g.targetIP, sourceNetId, routeName, hostAddr, g.routeUsername, g.routePassword)
 		if err != nil {
 			g.log.Warnf("Route registration failed (will attempt TCP connection anyway): %v", err)
+		} else {
+			// Give the PLC time to apply the route before connecting via TCP.
+			// Older PLCs (TwinCAT 2) may need this delay.
+			time.Sleep(1 * time.Second)
 		}
 	}
 
