@@ -134,7 +134,7 @@ input:
 - **runtimePort**: Runtime port of PLC system, 800 to 899. TwinCAT 2 uses 800-850 and TwinCAT 3 is recommended to use 851-899. TwinCAT 2 usually has 801 as default and TwinCAT 3 uses 851
 - **hostAMS**: Host AMS net ID. Usually the IP address + `.1.1`. Must match a route on the PLC. Use `auto` (default) to automatically derive it — when `routeHostAddress` is set, derives from that address; otherwise derives from the outbound connection's local IP
 - **hostPort**: AMS source port used in protocol headers. This is a logical port, not a network port. Any arbitrary value works (default 10500)
-- **readType**: Read type for the symbols. `interval` means benthos reads all symbols at a specified interval and `notification` is a function in the PLC where benthos sends a notification request to the PLC and the PLC adds the symbol to its internal notification system and sends data whenever there is a change
+- **readType**: Read type for the symbols. `interval` means benthos reads all symbols at a specified interval and `notification` uses the PLC's built-in notification system — the plugin registers symbols once, and the PLC pushes updates over the existing TCP connection. What triggers an update depends on `transmissionMode`: with the default `serverOnChange`, the PLC only sends data when a value changes; with `serverCycle`, it sends at every `cycleTime` interval regardless of changes. See [Transmission Modes](#transmission-modes)
 - **maxDelay**: Default max delay for sending notifications in ms. Sets a maximum time for how long after the change the PLC must send the notification
 - **cycleTime**: Default cycle time for notification handler in ms. Tells the notification handler how often to scan for changes. For symbols like triggers that are only true or false for 1 PLC cycle it can be necessary to use a low value
 - **intervalTime**: Interval time for reading in ms. For reading batches of symbols this sets the time between readings
@@ -173,6 +173,23 @@ input:
     # transmissionMode: 'serverOnChange2' # enhanced, auto-falls back on older PLCs
     # transmissionMode: 'serverCycle2'    # enhanced cyclic, auto-falls back on older PLCs
 ```
+
+#### Interval vs Notification
+
+The `interval` and `notification` read types can produce similar-looking results (periodic data), but they work differently under the hood:
+
+- **`interval`**: The client polls the PLC — sends an ADS Read request for each symbol at every `intervalTime` interval. Simple, no PLC notification overhead, and not subject to the ~500-notification limit.
+- **`notification` + `serverOnChange`**: The PLC pushes data only when a value changes. Most efficient for event-driven data. Subject to the ~500-notification limit per connection.
+- **`notification` + `serverCycle`**: The PLC pushes data at every `cycleTime` interval regardless of changes. Similar result to `interval` but PLC-driven — more precise timing with no request/response overhead per cycle. Subject to the ~500-notification limit.
+
+| Aspect | `interval` | `notification` + `serverOnChange` | `notification` + `serverCycle` |
+|--------|-----------|-----------------------------------|-------------------------------|
+| Who drives | Client polls | PLC pushes on change | PLC pushes on timer |
+| Network per cycle | Request + response | Push only | Push only |
+| Sends unchanged values | Yes | No | Yes |
+| Timing precision | Subject to network latency | PLC real-time task | PLC real-time task |
+| PLC notification limit | No limit | ~500 max | ~500 max |
+| Best for | Large symbol lists, simple setup | Event-driven data (most use cases) | Precise periodic sampling |
 
 #### Route Registration
 
