@@ -128,24 +128,34 @@ input:
 ```
 
 #### Configuration Parameters
-- **targetIP**: IP address of the PLC
-- **targetAMS**: AMS net ID of the target
-- **targetPort**: Port of the target internal gateway (default 48898)
-- **runtimePort**: Runtime port of PLC system, 800 to 899. TwinCAT 2 uses 800-850 and TwinCAT 3 is recommended to use 851-899. TwinCAT 2 usually has 801 as default and TwinCAT 3 uses 851
-- **hostAMS**: Host AMS net ID. Usually the IP address + `.1.1`. Must match a route on the PLC. Use `auto` (default) to automatically derive it — when `routeHostAddress` is set, derives from that address; otherwise derives from the outbound connection's local IP
-- **hostPort**: AMS source port used in protocol headers. This is a logical port, not a network port. Any arbitrary value works (default 10500)
-- **readType**: Read type for the symbols. `interval` means benthos reads all symbols at a specified interval and `notification` uses the PLC's built-in notification system — the plugin registers symbols once, and the PLC pushes updates over the existing TCP connection. What triggers an update depends on `transmissionMode`: with the default `serverOnChange`, the PLC only sends data when a value changes; with `serverCycle`, it sends at every `cycleTime` interval regardless of changes. See [Transmission Modes](#transmission-modes)
-- **maxDelay**: Default max delay for sending notifications in ms. Sets a maximum time for how long after the change the PLC must send the notification
-- **cycleTime**: Default cycle time for notification handler in ms. Tells the notification handler how often to scan for changes. For symbols like triggers that are only true or false for 1 PLC cycle it can be necessary to use a low value
-- **intervalTime**: Interval time for reading in ms. For reading batches of symbols this sets the time between readings
-- **requestTimeout**: Timeout for individual ADS requests in milliseconds (default 5000). Increase this if you experience timeouts with slow PLCs or large symbol tables
-- **transmissionMode**: Notification transmission mode (default `serverOnChange`). Only applies when `readType` is `notification` — ignored for `interval` mode since it uses plain ADS Read commands instead. See [Transmission Modes](#transmission-modes) below
-- **upperCase**: Converts symbol names to all uppercase for older PLCs. For TwinCAT 2 this is often necessary
-- **logLevel**: Log level for ADS connection. Sets the log level of the internal log function for the underlying ads library. When set to `debug` or `trace`, ADS error codes will be shown with human-readable descriptions (e.g. `0x0710: symbol not found` instead of just `1808`)
-- **routeUsername**: Username for automatic UDP route registration on the PLC. If set, a route will be registered before connecting. See [Route Registration](#route-registration)
-- **routePassword**: Password for automatic UDP route registration on the PLC
-- **routeHostAddress**: The IP address the PLC associates with the route. When running in Docker with bridge networking, this must be set to the Docker host's IP on the PLC network. When `hostAMS` is `auto`, the AMS NetID is also derived from this address. Auto-detected from the outbound connection if left empty (only correct with `host_network` or macvlan)
-- **symbols**: List of symbols to read from in the format `function.variable:maxDelay:cycleTime`, e.g. `MAIN.MYTRIGGER:0:10` is a variable in the main program with 0ms max delay and 10ms cycle time, `MAIN.MYBOOL` is a variable in the main program with no extra arguments so it will use the default max delay and cycle time. `.superDuperInt` is a global variable with no extra arguments. All global variables must start with a `.` e.g. `.someStrangeVar`
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| **targetIP** | Yes | — | IP address of the Beckhoff PLC |
+| **targetAMS** | Yes | — | AMS net ID of the target |
+| **symbols** | Yes | — | List of symbols to read from (see [Symbol Format](#symbol-format) below) |
+| **targetPort** | No | `48898` | Port of the target internal gateway |
+| **runtimePort** | No | `801` | Runtime port of PLC system, 800–899. TwinCAT 2 uses 800–850 (usually 801), TwinCAT 3 uses 851–899 (usually 851) |
+| **hostAMS** | No | `auto` | Host AMS net ID. Usually the IP address + `.1.1`. Must match a route on the PLC. `auto` derives it from `routeHostAddress` if set, otherwise from the outbound connection's local IP |
+| **hostPort** | No | `10500` | AMS source port used in protocol headers. This is a logical port, not a network port. Any arbitrary value works |
+| **readType** | No | `notification` | Read type for the symbols. `interval` polls at `intervalTime`; `notification` uses PLC push updates (see [Interval vs Notification](#interval-vs-notification)) |
+| **maxDelay** | No | `100` | Default max delay for sending notifications in ms. Maximum time after value change before PLC must send the notification |
+| **cycleTime** | No | `1000` | Default cycle time for notification handler in ms. How often the PLC scans for changes. Use a low value for triggers that are only true/false for 1 PLC cycle |
+| **intervalTime** | No | `1000` | Interval time between reads in ms (only used when `readType` is `interval`) |
+| **requestTimeout** | No | `5000` | Timeout for individual ADS requests in ms. Increase for slow PLCs or large symbol tables |
+| **transmissionMode** | No | `serverOnChange` | Notification transmission mode. Only applies when `readType` is `notification`. Options: `serverOnChange`, `serverCycle`, `serverOnChange2`, `serverCycle2` (see [Transmission Modes](#transmission-modes)) |
+| **upperCase** | No | `true` | Convert symbol names to all uppercase. Often necessary for TwinCAT 2 PLCs |
+| **logLevel** | No | `disabled` | Log level for ADS connection (`disabled`, `error`, `warn`, `info`, `debug`, `trace`). At `debug`/`trace`, ADS error codes show human-readable descriptions |
+| **routeUsername** | No | `""` | Username for automatic UDP route registration on the PLC. If set, a route is registered before connecting (see [Route Registration](#route-registration)) |
+| **routePassword** | No | `""` | Password for automatic UDP route registration on the PLC |
+| **routeHostAddress** | No | `""` | IP address the PLC associates with the route. Required in Docker bridge networking (set to Docker host's IP). When `hostAMS` is `auto`, the AMS NetID is also derived from this. Auto-detected from outbound connection if empty (only correct with `host_network` or macvlan) |
+
+##### Symbol Format
+
+Symbols are specified in the format `function.variable:maxDelay:cycleTime`:
+- `MAIN.MYBOOL` — variable in the main program, uses default maxDelay and cycleTime
+- `MAIN.MYTRIGGER:0:10` — variable with 0ms max delay and 10ms cycle time
+- `.superDuperInt` — global variable (must start with `.`)
 
 #### Transmission Modes
 
