@@ -11,12 +11,12 @@ import (
 
 func (conn *Connection) GetSymbol(symbolName string) (*Symbol, error) {
 	conn.symbolLock.Lock()
-	defer conn.symbolLock.Unlock()
 	localSymbol, ok := conn.symbols[symbolName]
 	if ok {
 		if localSymbol.Handle == 0 {
 			handle, err := conn.GetHandleByName(symbolName)
 			if err != nil {
+				conn.symbolLock.Unlock()
 				return nil, err
 			}
 			localSymbol.Handle = handle
@@ -24,14 +24,89 @@ func (conn *Connection) GetSymbol(symbolName string) (*Symbol, error) {
 		log.Trace().
 			Interface("symbol", localSymbol).
 			Msg("symbol got")
+		conn.symbolLock.Unlock()
 		return localSymbol, nil
 	}
-	err := fmt.Errorf("symbol does not exist")
-	log.Error().
-		Err(err).
-		Str("symbol name", symbolName).
-		Msg("error getting handle by name")
-	return nil, err
+	conn.symbolLock.Unlock()
+
+	// On-demand resolution: query the PLC for this specific symbol
+	sym, err := conn.getSymbolInfoByName(symbolName)
+	if err != nil {
+		return nil, fmt.Errorf("symbol %q not found and on-demand lookup failed: %w", symbolName, err)
+	}
+
+	handle, err := conn.GetHandleByName(symbolName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get handle for %q: %w", symbolName, err)
+	}
+	sym.Handle = handle
+
+	conn.symbolLock.Lock()
+	// Check if another goroutine resolved this symbol while we were waiting
+	if existing, ok := conn.symbols[symbolName]; ok {
+		conn.symbolLock.Unlock()
+		return existing, nil
+	}
+	conn.symbols[symbolName] = sym
+	conn.symbolLock.Unlock()
+
+	log.Info().
+		Str("symbol", symbolName).
+		Str("dataType", sym.DataType).
+		Uint32("length", sym.Length).
+		Msg("symbol resolved on-demand")
+
+	return sym, nil
+}
+
+// getSymbolInfoByName queries a single symbol's metadata from the PLC
+// using GroupSymbolInfoByNameEx (0xF009).
+func (conn *Connection) getSymbolInfoByName(symbolName string) (*Symbol, error) {
+	resp, err := conn.WriteRead(
+		uint32(GroupSymbolInfoByNameEx),
+		0,
+		2048,
+		[]byte(symbolName),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GetSymbolInfoByName(%s) failed: %w", symbolName, err)
+	}
+
+	buff := bytes.NewBuffer(resp)
+	entry := symbolEntry{}
+	if err := binary.Read(buff, binary.LittleEndian, &entry); err != nil {
+		return nil, fmt.Errorf("failed to parse symbol entry for %s: %w", symbolName, err)
+	}
+
+	// Read null-terminated strings: name, type, comment
+	name := make([]byte, entry.NameLength)
+	binary.Read(buff, binary.LittleEndian, name)
+	buff.Next(1) // null terminator
+
+	dt := make([]byte, entry.TypeLength)
+	binary.Read(buff, binary.LittleEndian, dt)
+	buff.Next(1) // null terminator
+
+	comment := make([]byte, entry.CommentLength)
+	binary.Read(buff, binary.LittleEndian, comment)
+
+	dataType := string(dt)
+	if len(dataType) >= 6 && dataType[:6] == "STRING" {
+		dataType = "STRING"
+	}
+
+	sym := &Symbol{
+		FullName:          symbolName,
+		Name:              string(name),
+		DataType:          dataType,
+		Comment:           string(comment),
+		Group:             entry.IGroup,
+		Offset:            entry.IOffs,
+		Length:            entry.Size,
+		LastUpdateTime:    time.Now(),
+		MinUpdateInterval: 50 * time.Millisecond,
+	}
+	return sym, nil
 }
 
 func (conn *Connection) GetHandleByName(symbolName string) (handle uint32, err error) {

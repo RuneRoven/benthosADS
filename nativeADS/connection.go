@@ -84,6 +84,7 @@ func NewConnection(ctx context.Context, ip string, port int, netid string, amsPo
 	conn.systemResponse = make(chan []byte)
 	conn.activeRequests = map[uint32]chan []byte{}
 	conn.activeNotifications = make(map[uint32]*Symbol)
+	conn.symbols = make(map[string]*Symbol)
 	conn.sendChannel = make(chan []byte)
 	// Use an independent context so that Close() can still send cleanup commands
 	// even after the parent context is canceled (e.g. on SIGTERM)
@@ -148,11 +149,6 @@ func (conn *Connection) Connect(local bool) error {
 				Msgf("ERROR %v", err)
 		}
 		conn.source = result
-	}
-	err = conn.loadSymbols()
-	if err != nil {
-		log.Error().Err(err).Msg("failed to load symbols during connect")
-		return err
 	}
 	return nil
 }
@@ -259,34 +255,20 @@ func (conn *Connection) Reconnect() error {
 			tcpConn.SetKeepAlivePeriod(5 * time.Second)
 		}
 
-		// Clear disconnected flag so sendRequest works during symbol load
+		// Clear disconnected flag so sendRequest works during on-demand symbol resolution
 		conn.disconnected.Store(false)
 
 		// Re-start goroutines
 		go conn.listen()
 		go conn.transmitWorker()
 
-		// Re-load symbols
-		err = conn.loadSymbols()
-		if err != nil {
-			lastErr = err
-			conn.disconnected.Store(true)
-			log.Warn().Err(err).Int("attempt", attempts).Msg("reconnect symbol load failed, retrying")
-			// Stop goroutines before next attempt
-			conn.shutdown()
-			if conn.connection != nil {
-				conn.connection.Close()
-			}
-			conn.waitGroup.Wait()
-			conn.ctx, conn.shutdown = context.WithCancel(context.Background())
-			conn.sendChannel = make(chan []byte)
-			conn.systemResponse = make(chan []byte)
-			conn.activeRequests = map[uint32]chan []byte{}
-			time.Sleep(conn.reconnectInterval)
-			continue
-		}
+		// Clear old symbols — they'll be re-resolved on-demand when accessed
+		conn.symbolLock.Lock()
+		conn.symbols = make(map[string]*Symbol)
+		conn.symbolLock.Unlock()
 
 		// Re-subscribe notifications using stored configs (don't re-append)
+		// This triggers GetSymbol() which will on-demand resolve each symbol
 		if len(conn.notificationConfigs) > 0 && conn.notificationChannel != nil {
 			savedConfigs := conn.notificationConfigs
 			conn.notificationConfigs = nil // Clear before re-adding to prevent duplicates
