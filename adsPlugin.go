@@ -4,22 +4,111 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	adsLib "github.com/RuneRoven/go-ads/v2"
 	"github.com/redpanda-data/benthos/v4/public/service"
-	"github.com/rs/zerolog"
-
-	adsLib "github.com/RuneRoven/benthosADS/nativeADS"
 )
+
+// benthosLogHandler bridges go-ads v2 slog-based logging into Benthos's logging infrastructure.
+type benthosLogHandler struct {
+	logger *service.Logger
+	level  slog.Level
+	attrs  []slog.Attr
+}
+
+func (h *benthosLogHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= h.level
+}
+
+func (h *benthosLogHandler) Handle(_ context.Context, r slog.Record) error {
+	var kvs []any
+	for _, a := range h.attrs {
+		kvs = append(kvs, a.Key, a.Value.Any())
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		kvs = append(kvs, a.Key, a.Value.Any())
+		return true
+	})
+	l := h.logger
+	if len(kvs) > 0 {
+		l = l.With(kvs...)
+	}
+	switch {
+	case r.Level >= slog.LevelError:
+		l.Errorf("%s", r.Message)
+	case r.Level >= slog.LevelWarn:
+		l.Warnf("%s", r.Message)
+	case r.Level >= slog.LevelInfo:
+		l.Infof("%s", r.Message)
+	default:
+		l.Debugf("%s", r.Message)
+	}
+	return nil
+}
+
+func (h *benthosLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &benthosLogHandler{logger: h.logger, level: h.level, attrs: append(h.attrs, attrs...)}
+}
+
+func (h *benthosLogHandler) WithGroup(_ string) slog.Handler { return h }
+
+// validateIP checks that s is a valid IPv4 address (4 dot-separated octets, each 0–255).
+func validateIP(s string) error {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return fmt.Errorf("%q must have 4 dot-separated octets", s)
+	}
+	for _, p := range parts {
+		v, err := strconv.Atoi(p)
+		if err != nil || v < 0 || v > 255 {
+			return fmt.Errorf("%q contains invalid octet %q (must be 0–255)", s, p)
+		}
+	}
+	return nil
+}
+
+// validateAMSNetID checks that s is a valid AMS NetID (6 dot-separated octets, each 0–255).
+func validateAMSNetID(s string) error {
+	parts := strings.Split(s, ".")
+	if len(parts) != 6 {
+		return fmt.Errorf("%q must have 6 dot-separated octets (e.g. 192.168.1.100.1.1)", s)
+	}
+	for _, p := range parts {
+		v, err := strconv.Atoi(p)
+		if err != nil || v < 0 || v > 255 {
+			return fmt.Errorf("%q contains invalid octet %q (must be 0–255)", s, p)
+		}
+	}
+	return nil
+}
+
+func slogLevelFromString(level string) slog.Level {
+	switch level {
+	case "trace":
+		return adsLib.LevelTrace
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.Level(100)
+	}
+}
 
 type plcSymbol struct {
 	name      string
-	maxDelay  int
-	cycleTime int
+	maxDelay  time.Duration
+	cycleTime time.Duration
 }
 
 func sanitize(s string) string {
@@ -29,8 +118,6 @@ func sanitize(s string) string {
 
 // isLikelyContainerIP checks if an IP address looks like a Docker/container-internal
 // address that is probably not routable from an external PLC network.
-// Docker bridge networks typically use 172.17.0.0/16, 172.18-31.0.0/16, or 10.0.0.0/8.
-// Kubernetes pod networks commonly use 10.x.x.x or 100.64-127.x.x (CGNAT range).
 func isLikelyContainerIP(ip string) bool {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
@@ -55,33 +142,23 @@ func isLikelyContainerIP(ip string) bool {
 	return false
 }
 
-
-func createSymbolList(s []string, defaultCycleTime int, defaultMaxDelay int, upperCase bool) []plcSymbol {
-	var newPlcSymbol []plcSymbol
-	// Iterate through symbol list
+// createSymbolList parses symbol strings into plcSymbol structs.
+// Format: "name" or "name:maxDelayMs:cycleTimeMs"
+func createSymbolList(s []string, defaultCycleTime int, defaultMaxDelay int) []plcSymbol {
+	var result []plcSymbol
 	for _, symbol := range s {
-		if upperCase {
-			symbol = strings.ToUpper(symbol)
-		}
-		// Count colons in the symbol
 		colons := strings.Count(symbol, ":")
-
-		// Create a new plcSymbol instance
-		var plcSym plcSymbol
-
-		// If there are anything other than two colons, add default value
+		var sym plcSymbol
 		if colons != 2 {
 			parts := strings.Split(symbol, ":")
 			if len(parts) > 0 {
-				plcSym.name = parts[0]
+				sym.name = parts[0]
 			}
-			plcSym.maxDelay = defaultMaxDelay
-			plcSym.cycleTime = defaultCycleTime
+			sym.maxDelay = time.Duration(defaultMaxDelay) * time.Millisecond
+			sym.cycleTime = time.Duration(defaultCycleTime) * time.Millisecond
 		} else {
 			parts := strings.Split(symbol, ":")
-			plcSym.name = parts[0]
-
-			// Convert maxDelay and cycleTime, with default values in case of errors
+			sym.name = parts[0]
 			maxDelay, err1 := strconv.Atoi(parts[1])
 			if err1 != nil {
 				maxDelay = defaultMaxDelay
@@ -90,97 +167,81 @@ func createSymbolList(s []string, defaultCycleTime int, defaultMaxDelay int, upp
 			if err2 != nil {
 				cycleTime = defaultCycleTime
 			}
-			plcSym.maxDelay = maxDelay
-			plcSym.cycleTime = cycleTime
-
+			sym.maxDelay = time.Duration(maxDelay) * time.Millisecond
+			sym.cycleTime = time.Duration(cycleTime) * time.Millisecond
 		}
-		// Append the created plcSymbol to the list
-		newPlcSymbol = append(newPlcSymbol, plcSym)
+		result = append(result, sym)
 	}
-
-	return newPlcSymbol
+	return result
 }
 
-// ads communication struct defines the structure for our custom Benthos input plugin.
-// It holds the configuration necessary to establish a connection with a Beckhoff PLC,
-// along with the read requests to fetch data from the PLC.
 type adsCommInput struct {
-	targetIP         string              // IP address of the PLC.
-	targetAMS        string              // Target AMS net ID.
-	targetPort       int                 // Target port
-	runtimePort      int                 // Target runtime port. Default 801(Twincat 2)
-	hostAMS          string              // The host AMS net ID, auto (default) automatically derives AMS from host IP. Enter manually if auto not working
-	hostPort         int                 // The host port
-	readType         string              // Read type, interval or notification
-	cycleTime        int                 // Read interval time if read type interval, cycle time if read type notification in milliseconds
-	maxDelay         int                 // Max delay time after value change before PLC should send message, in milliseconds
-	intervalTime     time.Duration       // Time duration before a connection attempt or read request times out.
-	requestTimeout   time.Duration       // Timeout for individual ADS requests.
-	handler          *adsLib.Connection  // TCP handler to manage the connection.
-	log              *service.Logger     // Logger for logging plugin activity.
-	symbols          []plcSymbol         // List of items to read from the PLC
-	deviceInfo       adsLib.DeviceInfo   // PLC device info
-	deviceSymbols    adsLib.Symbol       // Received symbols from PLC
-	notificationChan chan *adsLib.Update // notification channel for PLC data
-	transmissionMode adsLib.TransMode   // Notification transmission mode
+	targetIP         string
+	targetAMS        string
+	targetPort       int
+	runtimePort      int
+	hostAMS          string
+	hostPort         int
+	readType         string
+	cycleTime        int
+	maxDelay         int
+	intervalTime     time.Duration
+	requestTimeout   time.Duration
+	handler          *adsLib.Session
+	log              *service.Logger
+	symbols          []plcSymbol
+	notificationChan chan *adsLib.Update
+	transmissionMode adsLib.TransMode
+
+	// Shutdown signal — closed by Close() to unblock ReadBatchNotification.
+	done chan struct{}
+
+	// Symbol metadata populated lazily after connect (from go-ads cache, no extra round-trips).
+	dataTypes   map[string]string
+	baseTypes   map[string]string
+	dataSizes   map[string]uint32
+	symbolNames map[string]string // strings.ToLower(name) → configured casing (TC2 returns uppercase)
 
 	// Route registration settings
-	routeUsername    string // If set, register a route before connecting
-	routePassword   string
-	routeHostAddress string // Address the PLC uses to reach this client (auto-detected if empty)
+	routeUsername    string
+	routePassword    string
+	routeHostAddress string
+
+	adsLogger *slog.Logger
 }
 
 var adsConf = service.NewConfigSpec().
-	Summary("Creates an input that reads data from Beckhoff PLCs using adsLib. Created by Daniel H").
+	Summary("Creates an input that reads data from Beckhoff PLCs using ADS protocol. Created by Daniel H").
 	Description("This input plugin enables Benthos to read data directly from Beckhoff PLCs using the ADS protocol. " +
-		"Configure the plugin by specifying the PLC's IP address, runtime port, target AMS net ID, etc. etc, add more here.").
+		"Configure the plugin by specifying the PLC's IP address, runtime port, target AMS net ID, etc.").
 	Field(service.NewStringField("targetIP").Description("IP address of the Beckhoff PLC.")).
 	Field(service.NewStringField("targetAMS").Description("Target AMS net ID.")).
-	Field(service.NewIntField("targetPort").Description("Target port. Default 48898 (Twincat 2)").Default(48898)).
-	Field(service.NewIntField("runtimePort").Description("Target runtime port. Default 801(Twincat 2)").Default(801)).
-	Field(service.NewStringField("hostAMS").Description("The host AMS net ID, use auto (default) to automatically derive AMS from host IP. Enter manually if auto not working").Default("auto")).
-	Field(service.NewIntField("hostPort").Description("AMS source port used in protocol headers. This is a logical port, not a network port. Any arbitrary value works.").Default(10500)).
-	Field(service.NewStringField("readType").Description("Read type, interval or notification (default)").Default("notification")).
-	Field(service.NewIntField("maxDelay").Description("Max delay time after value change before PLC should send message, in milliseconds. Default 100").Default(100)).
-	Field(service.NewIntField("cycleTime").Description("Requested read interval time for PLC to scan for changes if read type notification, in milliseconds.").Default(1000)).
-	Field(service.NewIntField("intervalTime").Description("The interval time between reads milliseconds for read requests.").Default(1000)).
-	Field(service.NewBoolField("upperCase").Description("Convert symbol names to uppercase(needed on some older PLCs). Default true ").Default(true)).
-	Field(service.NewStringField("logLevel").Description("Log level for ADS connection. Default disabled").Default("disabled")).
-	Field(service.NewIntField("requestTimeout").Description("Timeout for individual ADS requests in milliseconds. Default 5000").Default(5000)).
-	Field(service.NewStringField("transmissionMode").Description("Notification transmission mode: serverOnChange (default), serverCycle, serverOnChange2, serverCycle2").Default("serverOnChange")).
-	Field(service.NewStringField("routeUsername").Description("Username for UDP route registration on the PLC. If set, a route will be registered before connecting.").Default("")).
+	Field(service.NewIntField("targetPort").Description("TCP port of the PLC ADS gateway.").Default(48898)).
+	Field(service.NewIntField("runtimePort").Description("Target runtime port. 801 for TwinCAT 2, 851 for TwinCAT 3.").Default(801)).
+	Field(service.NewStringField("hostAMS").Description("Local AMS net ID. 'auto' derives it from the outbound TCP source IP.").Default("auto")).
+	Field(service.NewIntField("hostPort").Description("AMS source port used in protocol headers. Any arbitrary value works.").Default(10500)).
+	Field(service.NewStringField("readType").Description("Read type, interval or notification (default).").Default("notification")).
+	Field(service.NewIntField("maxDelay").Description("Max delay time after value change before PLC should send message, in milliseconds.").Default(100)).
+	Field(service.NewIntField("cycleTime").Description("Requested read interval for PLC to scan for changes (notification mode), in milliseconds.").Default(1000)).
+	Field(service.NewIntField("intervalTime").Description("Interval between reads in milliseconds for interval read type.").Default(1000)).
+	Field(service.NewStringField("logLevel").Description("Log level for ADS connection. Default disabled.").Default("disabled")).
+	Field(service.NewIntField("requestTimeout").Description("Timeout for individual ADS requests in milliseconds.").Default(5000)).
+	Field(service.NewStringField("transmissionMode").Description("Notification transmission mode: serverOnChange (default), serverCycle, serverOnChange2, serverCycle2.").Default("serverOnChange")).
+	Field(service.NewStringField("routeUsername").Description("Username for UDP route registration on the PLC. If set with routePassword, a route will be registered before connecting.").Default("")).
 	Field(service.NewStringField("routePassword").Description("Password for UDP route registration on the PLC.").Default("")).
 	Field(service.NewStringField("routeHostAddress").Description("The address the PLC should use to reach this client. Auto-detected from outbound connection if empty.").Default("")).
-Field(service.NewStringListField("symbols").Description("List of symbols to read in the format 'function.name', e.g., 'MAIN.counter', '.globalCounter' " +
-		"If using custom max delay and cycle time for a symbol the format is 'function.name:maxDelay:cycleTime', e.g,. 'MAIN.counter:0:100', '.globalCounter:100:10'"))
+	Field(service.NewStringListField("symbols").Description("Symbols to read. Format: 'MAIN.var' or 'MAIN.var:maxDelayMs:cycleTimeMs'. " +
+		"Examples: 'MAIN.counter', '.globalCounter', 'MAIN.var:50:100'"))
 
 func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (service.BatchInput, error) {
-
 	logLevel, err := conf.FieldString("logLevel")
 	if err != nil {
 		return nil, err
 	}
-	// set log level of ADS library
-	switch logLevel {
-	case "panic":
-		zerolog.SetGlobalLevel(zerolog.PanicLevel)
-	case "fatal":
-		zerolog.SetGlobalLevel(zerolog.FatalLevel)
-	case "error":
-		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
-	case "warn":
-		zerolog.SetGlobalLevel(zerolog.WarnLevel)
-	case "info":
-		zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	case "debug":
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	case "trace":
-		zerolog.SetGlobalLevel(zerolog.TraceLevel)
-	case "disabled":
-		zerolog.SetGlobalLevel(zerolog.Disabled)
-	default:
-		zerolog.SetGlobalLevel(zerolog.Disabled)
-	}
+	adsLogger := slog.New(&benthosLogHandler{
+		logger: mgr.Logger(),
+		level:  slogLevelFromString(logLevel),
+	})
 
 	targetIP, err := conf.FieldString("targetIP")
 	if err != nil {
@@ -192,6 +253,13 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		return nil, err
 	}
 
+	if err = validateIP(targetIP); err != nil {
+		return nil, fmt.Errorf("targetIP: %w", err)
+	}
+	if err = validateAMSNetID(targetAMS); err != nil {
+		return nil, fmt.Errorf("targetAMS: %w", err)
+	}
+
 	targetPort, err := conf.FieldInt("targetPort")
 	if err != nil {
 		return nil, err
@@ -201,23 +269,34 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 	if err != nil {
 		return nil, err
 	}
+	if runtimePort < 0 || runtimePort > 65535 {
+		return nil, fmt.Errorf("runtimePort %d out of range 0–65535", runtimePort)
+	}
 
 	hostAMS, err := conf.FieldString("hostAMS")
 	if err != nil {
 		return nil, err
+	}
+	if hostAMS != "auto" && hostAMS != "" {
+		if err = validateAMSNetID(hostAMS); err != nil {
+			return nil, fmt.Errorf("hostAMS: %w", err)
+		}
 	}
 
 	hostPort, err := conf.FieldInt("hostPort")
 	if err != nil {
 		return nil, err
 	}
+	if hostPort < 0 || hostPort > 65535 {
+		return nil, fmt.Errorf("hostPort %d out of range 0–65535", hostPort)
+	}
 
 	readType, err := conf.FieldString("readType")
 	if err != nil {
 		return nil, err
 	}
-	if !(readType == "notification" || readType == "interval") {
-		return nil, errors.New("wrong read type")
+	if readType != "notification" && readType != "interval" {
+		return nil, errors.New("readType must be 'notification' or 'interval'")
 	}
 
 	maxDelay, err := conf.FieldInt("maxDelay")
@@ -235,11 +314,7 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		return nil, err
 	}
 
-	timeoutInt, err := conf.FieldInt("intervalTime")
-	if err != nil {
-		return nil, err
-	}
-	upperCase, err := conf.FieldBool("upperCase")
+	intervalTimeInt, err := conf.FieldInt("intervalTime")
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +357,13 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		return nil, err
 	}
 
-	symbolList := createSymbolList(symbols, maxDelay, cycleTime, upperCase)
+	// Derive hostAMS from routeHostAddress when set to "auto",
+	// matching the same convenience shortcut as the integrated plugin.
+	if hostAMS == "auto" && routeHostAddress != "" {
+		hostAMS = routeHostAddress + ".1.1"
+	}
+
+	symbolList := createSymbolList(symbols, cycleTime, maxDelay)
 	m := &adsCommInput{
 		targetIP:         targetIP,
 		targetAMS:        targetAMS,
@@ -295,17 +376,18 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		cycleTime:        cycleTime,
 		symbols:          symbolList,
 		log:              mgr.Logger(),
-		intervalTime:     time.Duration(timeoutInt) * time.Millisecond,
+		intervalTime:     time.Duration(intervalTimeInt) * time.Millisecond,
 		requestTimeout:   time.Duration(requestTimeoutInt) * time.Millisecond,
-		notificationChan: make(chan *adsLib.Update),
+		notificationChan: make(chan *adsLib.Update, 256),
+		done:             make(chan struct{}),
 		transmissionMode: transmissionMode,
-		routeUsername:     routeUsername,
-		routePassword:     routePassword,
-		routeHostAddress:  routeHostAddress,
+		routeUsername:    routeUsername,
+		routePassword:    routePassword,
+		routeHostAddress: routeHostAddress,
+		adsLogger:        adsLogger,
 	}
 
 	return service.AutoRetryNacksBatched(m), nil
-
 }
 
 func init() {
@@ -324,100 +406,99 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 		return nil
 	}
 
-	// Create a new connection
-	g.log.Infof("Creating new connection")
-	var err error
-	g.handler, err = adsLib.NewConnection(ctx, g.targetIP, g.targetPort, g.targetAMS, g.runtimePort, g.hostAMS, g.hostPort, g.requestTimeout)
-	if err != nil {
-		g.log.Errorf("Failed to create connection: %v", err)
-		return err
+	if g.done == nil {
+		g.done = make(chan struct{})
 	}
 
-	// Register route if configured
-	if g.routeUsername != "" {
+	g.log.Infof("Creating new connection")
+
+	var connOpts []adsLib.SessionOption
+	if g.adsLogger != nil {
+		connOpts = append(connOpts, adsLib.WithLogger(g.adsLogger))
+		adsLib.SetDefaultLogger(g.adsLogger)
+	}
+
+	if g.routeUsername != "" && g.routePassword != "" {
 		hostAddr := g.routeHostAddress
 		if hostAddr == "" {
-			// Auto-detect local IP using UDP (doesn't require PLC to accept the connection)
-			udpConn, dialErr := net.Dial("udp4", net.JoinHostPort(g.targetIP, "48899"))
+			// Use TCP connect to guarantee same source IP as the actual ADS connection.
+			tcpConn, dialErr := net.DialTimeout("tcp4", net.JoinHostPort(g.targetIP, "48898"), 3*time.Second)
 			if dialErr != nil {
-				g.log.Errorf("Failed to auto-detect local address: %v", dialErr)
-				return dialErr
+				// PLC unreachable — fall back to UDP routing lookup (no packet sent).
+				udpConn, udpErr := net.Dial("udp4", net.JoinHostPort(g.targetIP, "48899"))
+				if udpErr != nil {
+					g.log.Errorf("Failed to auto-detect local address: %v", dialErr)
+					return dialErr
+				}
+				hostAddr = udpConn.LocalAddr().(*net.UDPAddr).IP.String()
+				udpConn.Close()
+			} else {
+				hostAddr = tcpConn.LocalAddr().(*net.TCPAddr).IP.String()
+				tcpConn.Close()
 			}
-			hostAddr = udpConn.LocalAddr().(*net.UDPAddr).IP.String()
-			udpConn.Close()
 		}
-
-		// Determine the AMS NetID for route registration.
-		// When hostAMS is "auto", derive from routeHostAddress (or auto-detected hostAddr)
-		// so that route registration works correctly in Docker bridge networking.
-		amsForRoute := g.hostAMS
-		if amsForRoute == "auto" || amsForRoute == "" {
-			if isLikelyContainerIP(hostAddr) {
-				g.log.Warnf("Auto-detected IP %s looks like a container IP. Set routeHostAddress to the Docker host's IP for route registration to work.", hostAddr)
-			}
-			amsForRoute = hostAddr + ".1.1"
-			// Also update hostAMS so the ADS connection uses the same NetID
-			g.hostAMS = amsForRoute
-			// Re-create the connection with the correct source NetID
-			g.handler, err = adsLib.NewConnection(ctx, g.targetIP, g.targetPort, g.targetAMS, g.runtimePort, g.hostAMS, g.hostPort, g.requestTimeout)
-			if err != nil {
-				g.log.Errorf("Failed to re-create connection with derived hostAMS: %v", err)
-				return err
-			}
-			g.log.Infof("Derived hostAMS from routeHostAddress: %s", amsForRoute)
+		if isLikelyContainerIP(hostAddr) {
+			g.log.Warnf("Auto-detected IP %s looks like a container IP. Set routeHostAddress to the Docker host's IP for route registration to work.", hostAddr)
 		}
-
-		sourceNetId := adsLib.StringToNetID(amsForRoute)
 		routeName := fmt.Sprintf("benthosADS-%s", hostAddr)
-		g.log.Infof("Registering route on PLC %s: name=%s, clientIP=%s, amsNetId=%s", g.targetIP, routeName, hostAddr, amsForRoute)
-		err = adsLib.AddRemoteRoute(g.targetIP, sourceNetId, routeName, hostAddr, g.routeUsername, g.routePassword)
-		if err != nil {
-			g.log.Warnf("Route registration failed (will attempt TCP connection anyway): %v", err)
-		} else {
-			// Give the PLC time to apply the route before connecting via TCP.
-			// Older PLCs (TwinCAT 2) may need this delay.
-			time.Sleep(1 * time.Second)
-		}
-
-		// Check for IP mismatch between registered route and actual TCP source
-		tcpProbe, probeErr := net.DialTimeout("tcp",
-			net.JoinHostPort(g.targetIP, fmt.Sprintf("%d", g.targetPort)),
-			3*time.Second)
-		if probeErr == nil {
-			actualIP := tcpProbe.LocalAddr().(*net.TCPAddr).IP.String()
-			tcpProbe.Close()
-			if actualIP != hostAddr {
-				g.log.Warnf("Route registered with hostAddress=%s but TCP connections originate from a different IP. "+
-					"Some PLCs (especially TwinCAT 2) validate that the TCP source IP matches the route and will reject the connection. "+
-					"Set routeHostAddress to the IP that the PLC sees as the TCP source.", hostAddr)
-			}
-		}
+		g.log.Infof("Route will be registered on PLC %s: name=%s, clientIP=%s", g.targetIP, routeName, hostAddr)
+		connOpts = append(connOpts, adsLib.WithRoute(routeName, g.routeUsername, g.routePassword))
+		connOpts = append(connOpts, adsLib.WithHostIP(hostAddr))
 	}
 
-	// Connect to the PLC
-	g.log.Infof("Connecting to plc")
-	err = g.handler.Connect(false)
+	targetAMS, err := adsLib.NewAMSAddress(g.targetAMS, uint16(g.runtimePort))
 	if err != nil {
-		g.log.Errorf("Failed to connect to PLC at %s: %v", g.targetIP, err)
-		g.handler.Close()
-		g.handler = nil
+		g.log.Errorf("Invalid target AMS %q: %v", g.targetAMS, err)
 		return err
 	}
 
-	// Read device info
-	/*   g.log.Infof("Read device info")
-	g.deviceInfo, err = g.handler.ReadDeviceInfo()
+	if g.hostAMS != "" && g.hostAMS != "auto" {
+		localAMS, lerr := adsLib.NewAMSAddress(g.hostAMS, uint16(g.hostPort))
+		if lerr != nil {
+			g.log.Errorf("Invalid local AMS %q: %v", g.hostAMS, lerr)
+			return lerr
+		}
+		connOpts = append(connOpts, adsLib.WithLocalAMS(localAMS))
+	}
+	if g.requestTimeout > 0 {
+		connOpts = append(connOpts, adsLib.WithRequestTimeout(g.requestTimeout))
+	}
+
+	// Use Background ctx for session lifetime — Benthos passes a per-call ctx to Connect
+	// that would tear the session down as soon as Connect returns. Teardown is driven by Close().
+	g.handler, err = adsLib.NewSession(context.Background(), adsLib.AMSEndpoint{
+		IP:   g.targetIP,
+		Port: g.targetPort,
+		AMS:  targetAMS,
+	}, connOpts...)
 	if err != nil {
-		g.log.Errorf("Failed to read device info: %v", err)
-		return
-	}*/
-	// g.log.Infof("Successfully connected to \"%s\" version %d.%d (build %d)", g.deviceInfo.DeviceName, g.deviceInfo.Major, g.deviceInfo.Minor, g.deviceInfo.Version)
+		g.log.Errorf("Failed to create session: %v", err)
+		return err
+	}
+
+	success := false
+	defer func() {
+		if !success && g.handler != nil {
+			_ = g.handler.Close()
+			g.handler = nil
+		}
+	}()
+
+	g.log.Infof("Connecting to PLC")
+	if err = g.handler.Connect(ctx); err != nil {
+		g.log.Errorf("Failed to connect to PLC at %s: %v", g.targetIP, err)
+		return err
+	}
+
+	g.symbolNames = make(map[string]string, len(g.symbols))
+	g.dataTypes = make(map[string]string, len(g.symbols))
+	g.baseTypes = make(map[string]string, len(g.symbols))
+	g.dataSizes = make(map[string]uint32, len(g.symbols))
+	for _, sym := range g.symbols {
+		g.symbolNames[strings.ToLower(sym.name)] = sym.name
+	}
 
 	if g.readType == "notification" {
-		g.log.Infof("wait 2s to establish connection before adding notifications")
-		time.Sleep(2 * time.Second)
-
-		// Build notification configs for batch add
 		configs := make([]adsLib.NotificationConfig, len(g.symbols))
 		for i, symbol := range g.symbols {
 			configs[i] = adsLib.NotificationConfig{
@@ -427,38 +508,122 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 				TransmissionMode: g.transmissionMode,
 			}
 		}
-		err = g.handler.AddSymbolNotifications(configs, g.notificationChan)
+
+		results, err := g.handler.AddSymbolNotifications(ctx, configs, g.notificationChan)
 		if err != nil {
 			g.log.Errorf("Batch add notifications failed: %v", err)
 			return err
 		}
 
-		g.log.Infof("wait 1s after adding notifications")
-		time.Sleep(1 * time.Second)
+		registered := 0
+		for i, r := range results {
+			switch {
+			case r.Skipped == nil && r.Error == adsLib.ReturnCodeNoErrors:
+				registered++
+			case r.Skipped != nil:
+				g.log.Errorf("Notification symbol %q skipped (check symbol name): %v", configs[i].SymbolName, r.Skipped)
+			default:
+				g.log.Errorf("Notification symbol %q rejected by PLC: ADS error 0x%X", configs[i].SymbolName, uint32(r.Error))
+			}
+		}
+		if registered == 0 && len(configs) > 0 {
+			return fmt.Errorf("no symbols registered for notifications (%d symbols all failed to resolve)", len(configs))
+		}
+		g.log.Infof("Registered %d/%d notification symbols", registered, len(configs))
+
+		// Wait for initial sample from each registered symbol. TwinCAT sends an
+		// immediate sample on subscribe, so this completes quickly and ensures the
+		// first ReadBatch returns a full batch.
+		needed := make(map[string]bool, registered)
+		for i, r := range results {
+			if r.Skipped == nil && r.Error == adsLib.ReturnCodeNoErrors {
+				needed[strings.ToLower(configs[i].SymbolName)] = true
+			}
+		}
+		initialCtx, initialCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer initialCancel()
+		for len(needed) > 0 {
+			select {
+			case update := <-g.notificationChan:
+				if update != nil {
+					delete(needed, strings.ToLower(update.Variable))
+				}
+			case <-initialCtx.Done():
+				g.log.Warnf("Timed out waiting for initial samples; %d symbols not yet received: %v", len(needed), needed)
+				goto doneWaiting
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	doneWaiting:
 	}
-	if g.readType != "notification" {
-		g.log.Infof("wait 2s to establish connection")
-		time.Sleep(2 * time.Second)
-	}
+
+	success = true
 	return nil
+}
+
+func (g *adsCommInput) makeNotificationMessage(update *adsLib.Update) *service.Message {
+	msg := service.NewMessage([]byte(update.Value))
+	key := strings.ToLower(update.Variable)
+	name := update.Variable
+	if configured, ok := g.symbolNames[key]; ok {
+		name = configured
+	}
+	msg.MetaSet("symbol_name", sanitize(name))
+	if dt, ok := g.dataTypes[key]; ok {
+		msg.MetaSet("data_type", dt)
+	}
+	if bt, ok := g.baseTypes[key]; ok {
+		msg.MetaSet("base_type", bt)
+	}
+	if sz, ok := g.dataSizes[key]; ok {
+		msg.MetaSet("data_size", strconv.FormatUint(uint64(sz), 10))
+	}
+	return msg
 }
 
 func (g *adsCommInput) ReadBatchPull(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
 	g.log.Debugf("ReadBatchPull called")
+	start := time.Now()
 	if g.handler == nil {
-		return nil, nil, errors.New("client is nil")
+		return nil, nil, service.ErrNotConnected
 	}
 
-	// Collect symbol names for batch read
 	names := make([]string, len(g.symbols))
 	for i, symbol := range g.symbols {
 		names[i] = symbol.name
 	}
 
-	values, err := g.handler.ReadMultipleSymbols(names)
+	values, err := g.handler.ReadMultipleSymbols(ctx, names)
 	if err != nil {
 		g.log.Errorf("Batch read failed: %v", err)
-		return nil, nil, err
+		if g.handler.IsClosed() {
+			old := g.handler
+			g.handler = nil
+			go func() { _ = old.Close() }()
+			return nil, nil, service.ErrNotConnected
+		}
+		g.log.Warnf("Batch read failed (will retry): %v", err)
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+		return service.MessageBatch{}, func(_ context.Context, _ error) error { return nil }, nil
+	}
+
+	// Lazily populate type metadata from go-ads cache (no extra round-trips).
+	for _, sym := range g.symbols {
+		key := strings.ToLower(sym.name)
+		if _, ok := g.dataTypes[key]; !ok {
+			if view, viewErr := g.handler.GetSymbol(ctx, sym.name); viewErr == nil {
+				g.dataTypes[key] = view.DataType
+				g.dataSizes[key] = view.Length
+				if bt := view.BaseTypeName(); bt != "" {
+					g.baseTypes[key] = bt
+				}
+			}
+		}
 	}
 
 	msgs := service.MessageBatch{}
@@ -467,64 +632,119 @@ func (g *adsCommInput) ReadBatchPull(ctx context.Context) (service.MessageBatch,
 		if !ok {
 			continue
 		}
+		key := strings.ToLower(symbol.name)
 		valueMsg := service.NewMessage([]byte(val))
 		valueMsg.MetaSet("symbol_name", sanitize(symbol.name))
+		if dt, ok := g.dataTypes[key]; ok {
+			valueMsg.MetaSet("data_type", dt)
+		}
+		if bt, ok := g.baseTypes[key]; ok {
+			valueMsg.MetaSet("base_type", bt)
+		}
+		if sz, ok := g.dataSizes[key]; ok {
+			valueMsg.MetaSet("data_size", strconv.FormatUint(uint64(sz), 10))
+		}
 		msgs = append(msgs, valueMsg)
 	}
 
-	time.Sleep(g.intervalTime)
-	return msgs, func(ctx context.Context, err error) error {
-		return nil
-	}, nil
+	// Some PLCs don't support ADS sum read — fall back to individual reads.
+	if len(msgs) == 0 && len(g.symbols) > 0 {
+		g.log.Warnf("Batch read returned no results for %d symbols, falling back to individual reads", len(g.symbols))
+		for _, symbol := range g.symbols {
+			val, readErr := g.handler.ReadFromSymbol(ctx, symbol.name)
+			if readErr != nil {
+				g.log.Errorf("Individual read failed for %s: %v", symbol.name, readErr)
+				continue
+			}
+			key := strings.ToLower(symbol.name)
+			valueMsg := service.NewMessage([]byte(val))
+			valueMsg.MetaSet("symbol_name", sanitize(symbol.name))
+			if dt, ok := g.dataTypes[key]; ok {
+				valueMsg.MetaSet("data_type", dt)
+			}
+			if bt, ok := g.baseTypes[key]; ok {
+				valueMsg.MetaSet("base_type", bt)
+			}
+			if sz, ok := g.dataSizes[key]; ok {
+				valueMsg.MetaSet("data_size", strconv.FormatUint(uint64(sz), 10))
+			}
+			msgs = append(msgs, valueMsg)
+		}
+	}
+
+	if remaining := g.intervalTime - time.Since(start); remaining > 0 {
+		select {
+		case <-time.After(remaining):
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+	return msgs, func(_ context.Context, _ error) error { return nil }, nil
 }
 
 func (g *adsCommInput) ReadBatchNotification(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
-	g.log.Infof("ReadBatchNotification called")
-	var res *adsLib.Update
-	select {
-	case res = <-g.notificationChan:
-		if res == nil {
-			// Channel was closed, shutting down
-			return nil, nil, service.ErrEndOfInput
-		}
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
-	case <-time.After(10 * time.Second):
-		return nil, nil, fmt.Errorf("timeout waiting for update")
-	}
-	msgs := service.MessageBatch{}
-	b := make([]byte, 0)
-	b = append(b, []byte(res.Value)...)
-	valueMsg := service.NewMessage(b)
-	valueMsg.MetaSet("symbol_name", sanitize(res.Variable))
-	msgs = append(msgs, valueMsg)
+	g.log.Debugf("ReadBatchNotification called")
 
-	return msgs, func(ctx context.Context, err error) error {
-		// Nacks are retried automatically when we use service.AutoRetryNacks
-		return nil
-	}, nil
+	// Short-lived context so ReadBatch returns periodically even with slow-changing symbols.
+	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var first *adsLib.Update
+	select {
+	case first = <-g.notificationChan:
+		if first == nil {
+			g.log.Warnf("Received nil update from ADS library, skipping")
+			return nil, func(_ context.Context, _ error) error { return nil }, nil
+		}
+	case <-g.done:
+		return nil, nil, service.ErrEndOfInput
+	case <-waitCtx.Done():
+		if g.handler != nil && g.handler.IsClosed() {
+			_ = g.handler.Close()
+			g.handler = nil
+			return nil, nil, service.ErrNotConnected
+		}
+		return nil, func(_ context.Context, _ error) error { return nil }, nil
+	}
+
+	msgs := service.MessageBatch{g.makeNotificationMessage(first)}
+
+	// Drain all pending notifications without blocking to keep the channel buffer available.
+	for {
+		select {
+		case update := <-g.notificationChan:
+			if update != nil {
+				msgs = append(msgs, g.makeNotificationMessage(update))
+			}
+		default:
+			return msgs, func(_ context.Context, _ error) error { return nil }, nil
+		}
+	}
 }
 
 func (g *adsCommInput) ReadBatch(ctx context.Context) (service.MessageBatch, service.AckFunc, error) {
 	g.log.Infof("ReadBatch called")
 	if g.readType == "notification" {
 		return g.ReadBatchNotification(ctx)
-	} else {
-		return g.ReadBatchPull(ctx)
 	}
+	return g.ReadBatchPull(ctx)
 }
 
+// Close shuts down the ADS connection.
+//
+//nolint:revive
 func (g *adsCommInput) Close(ctx context.Context) error {
 	g.log.Infof("Close called")
+	if g.done != nil {
+		close(g.done)
+		g.done = nil
+	}
 	if g.handler != nil {
 		g.log.Infof("Closing down, cleaning up PLC handles")
-		g.handler.Close()
+		if cerr := g.handler.Close(); cerr != nil {
+			g.log.Warnf("Handler close error: %v", cerr)
+		}
 		g.handler = nil
 	}
-	if g.notificationChan != nil {
-		close(g.notificationChan)
-		g.notificationChan = nil
-	}
-
 	return nil
 }

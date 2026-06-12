@@ -1,15 +1,14 @@
 module github.com/RuneRoven/benthosADS
 
-go 1.26.1
+go 1.26.3
 
 require (
-	github.com/redpanda-data/benthos/v4 v4.67.0
-	github.com/rs/zerolog v1.34.0
-	go.uber.org/atomic v1.11.0
+	github.com/RuneRoven/go-ads/v2 v2.2.0
+	github.com/redpanda-data/benthos/v4 v4.73.0
 )
 
 require (
-	cuelang.org/go v0.15.4 // indirect
+	cuelang.org/go v0.16.1 // indirect
 	github.com/Jeffail/gabs/v2 v2.7.0 // indirect
 	github.com/Jeffail/shutdown v1.1.0 // indirect
 	github.com/OneOfOne/xxhash v1.2.8 // indirect
@@ -43,13 +42,13 @@ require (
 	github.com/xrash/smetrics v0.0.0-20250705151800-55b8f293f342 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/otel v1.42.0 // indirect
-	go.opentelemetry.io/otel/metric v1.42.0 // indirect
-	go.opentelemetry.io/otel/trace v1.42.0 // indirect
-	golang.org/x/crypto v0.49.0 // indirect
+	go.opentelemetry.io/otel v1.43.0 // indirect
+	go.opentelemetry.io/otel/metric v1.43.0 // indirect
+	go.opentelemetry.io/otel/trace v1.43.0 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
