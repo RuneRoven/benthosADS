@@ -23,7 +23,6 @@ input:
     maxDelay: 100                   # Max delay for sending notifications in ms
     cycleTime: 100                  # Cycle time for notification handler in ms
     intervalTime: 1000              # Interval time for reading in ms
-    upperCase: true                 # Convert symbol names to all uppercase for older PLCS
     logLevel: "disabled"            # Log level for ADS connection
     symbols:                        # List of symbols to read from
       - "MAIN.MYBOOL"               # variable in the main program
@@ -144,7 +143,6 @@ input:
 | **intervalTime** | No | `1000` | Interval time between reads in ms (only used when `readType` is `interval`) |
 | **requestTimeout** | No | `5000` | Timeout for individual ADS requests in ms. Increase for slow PLCs or large symbol tables |
 | **transmissionMode** | No | `serverOnChange` | Notification transmission mode. Only applies when `readType` is `notification`. Options: `serverOnChange`, `serverCycle`, `serverOnChange2`, `serverCycle2` (see [Transmission Modes](#transmission-modes)) |
-| **upperCase** | No | `true` | Convert symbol names to all uppercase. Often necessary for TwinCAT 2 PLCs |
 | **logLevel** | No | `disabled` | Log level for ADS connection (`disabled`, `error`, `warn`, `info`, `debug`, `trace`). At `debug`/`trace`, ADS error codes show human-readable descriptions |
 | **routeUsername** | No | `""` | Username for automatic UDP route registration on the PLC. If set, a route is registered before connecting (see [Route Registration](#route-registration)) |
 | **routePassword** | No | `""` | Password for automatic UDP route registration on the PLC |
@@ -201,17 +199,77 @@ The `interval` and `notification` read types can produce similar-looking results
 | PLC notification limit | No limit | ~500 max | ~500 max |
 | Best for | Large symbol lists, simple setup | Event-driven data (most use cases) | Precise periodic sampling |
 
+#### Explanation of cycleTime and maxDelay
+
+**cycleTime** controls how often the PLC checks the variable:
+- `serverCycle` mode: PLC sends a notification every `cycleTime` ms regardless of value change
+- `serverOnChange` mode: PLC checks the value every `cycleTime` ms and sends a notification only if it changed
+
+**maxDelay** controls how long the PLC can buffer notifications before sending:
+- The PLC collects notification events and sends them in a batch when `maxDelay` ms expires
+- This is a network optimization: fewer packets, multiple notifications bundled in one AMS packet
+
+**Practical example** — `cycleTime: 10`, `maxDelay: 100`, mode `serverOnChange`:
+1. PLC checks variable every 10ms
+2. If value changed, queues a notification
+3. Sends queued notifications at most every 100ms (batched)
+
+**Edge cases:**
+- `maxDelay: 0` — send immediately, no batching
+- `cycleTime: 0` — check as fast as the PLC task cycle allows
+- `maxDelay` < `cycleTime` — effectively no batching (fires before next check)
+
+Think of it as:
+- **cycleTime** = polling interval (sensor sampling rate)
+- **maxDelay** = delivery batch window (network efficiency)
+
+**Important:** If a variable changes faster than `cycleTime`, intermediate values are missed:
+
+```
+cycleTime = 1000ms, mode = serverOnChange
+
+Time:    0ms    200ms   400ms   600ms   800ms   1000ms
+Value:   5  →   10  →   3   →   7   →   2   →   8
+PLC checks:  ↑                                    ↑
+Notifies: 5                                       8  (missed 10,3,7,2)
+```
+
+The PLC only samples at `cycleTime` intervals. Between checks, it is blind — this is not a continuous event stream.
+
+For fast-changing values, set `cycleTime` close to the PLC task cycle time (typically 1–10ms). Even at minimum `cycleTime`, there is no guarantee of capturing every value — if a variable changes twice within one PLC scan cycle, the intermediate value is lost. ADS notifications are polling with push delivery, not event capture.
+
+#### Notification Behavior
+
+##### First batch completeness
+
+When `readType: notification`, TwinCAT sends an initial sample for every subscribed symbol immediately on registration. The plugin waits for these initial samples before returning from `Connect`, so the **first `ReadBatch` always returns a complete batch** containing one message per successfully registered symbol. No separate read or warm-up period is needed to get the current state of all symbols.
+
+##### Partial registration failures
+
+If a symbol fails to register (unknown name, PLC-side ADS error), the plugin:
+- Logs an **error** identifying the symbol and reason
+- Continues with the remaining symbols — data flows for all successfully registered symbols
+- Does **not** trigger a reconnect for partial failures; only a full failure (zero symbols registered) forces a reconnect
+
+A misconfigured symbol name is surfaced immediately in logs without blocking data from the other symbols.
+
+##### Interval read — empty batches during reconnect
+
+When `readType: interval`, the first one or two batches after a reconnect may be **empty or partial** while the go-ads library re-resolves symbol handles. This is normal — Benthos retries the next poll and subsequent batches are complete.
+
 #### Route Registration
 
 The plugin can automatically register a route on the PLC using the Beckhoff UDP route protocol (port 48899). This removes the need to manually add routes in the TwinCAT System Manager.
 
-**How it works:**
-1. Before establishing the TCP connection, the plugin sends a UDP route registration packet to port 48899 on the PLC
-2. The packet tells the PLC: "Associate AMS NetID X with IP address Y"
-3. The PLC adds this as a runtime route (may not be visible in TwinCAT System Manager)
-4. The normal ADS TCP connection is then established over port 48898
+**Activation:** both `routeUsername` and `routePassword` must be set.
 
-Setting `routeUsername` activates automatic route registration. If route registration fails (e.g. UDP response lost due to NAT), the plugin logs a warning and still attempts the TCP connection — the route may have been created despite the missing response.
+**How it works:**
+1. The TCP connection to port 48898 is established
+2. The plugin probes the PLC with a lightweight ADS command to check if a route already exists
+3. If the probe succeeds, route registration is skipped (route already present)
+4. If the probe fails, the plugin sends a UDP registration packet to port 48899: "Associate AMS NetID X with IP address Y"
+5. After registration the TCP connection is re-established (some PLCs close connections from previously-unknown NetIDs)
+6. On reconnect after a network loss, the same probe-first logic runs automatically
 
 **Parameters:**
 - `routeUsername` / `routePassword`: PLC administrator credentials. Same as used in TwinCAT System Manager to add routes
@@ -232,7 +290,16 @@ No manual intervention is needed.
 
 #### Output
 
-This outputs for each address a single message with the payload being the value that was read. To distinguish messages, you can use meta("symbol_name") in a following benthos bloblang processor.
+Each symbol produces a single message with the payload being the string-encoded value. The following metadata fields are set on each message:
+
+| Metadata key | Description |
+|---|---|
+| `symbol_name` | Sanitized symbol name (dots/special chars replaced with `_`) |
+| `data_type` | PLC data type as reported by the symbol table (e.g. `BOOL`, `INT`, `ST_MyStruct`) |
+| `base_type` | Resolved primitive base type for aliases and enums (e.g. `DINT` for an enum backed by DINT) |
+| `data_size` | Symbol byte length as reported by the PLC |
+
+`data_type`, `base_type`, and `data_size` are populated lazily on first read and absent if symbol resolution fails. Use `meta("symbol_name")` in a Bloblang processor to route or label messages.
 
 ## Testing
 
