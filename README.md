@@ -147,6 +147,7 @@ input:
 | **routeUsername** | No | `""` | Username for automatic UDP route registration on the PLC. If set, a route is registered before connecting (see [Route Registration](#route-registration)) |
 | **routePassword** | No | `""` | Password for automatic UDP route registration on the PLC |
 | **routeHostAddress** | No | `""` | IP address the PLC associates with the route. Required in Docker bridge networking (set to Docker host's IP). When `hostAMS` is `auto`, the AMS NetID is also derived from this. Auto-detected from outbound connection if empty (only correct with `host_network` or macvlan) |
+| **loadSymbols** | No | `false` | Download the full symbol and datatype table from the PLC on connect. Required for struct and array symbols. May cause a brief real-time jitter on the PLC during the initial connection; use with care on large programs |
 
 ##### Symbol Format
 
@@ -154,6 +155,45 @@ Symbols are specified in the format `function.variable:maxDelay:cycleTime`:
 - `MAIN.MYBOOL` — variable in the main program, uses default maxDelay and cycleTime
 - `MAIN.MYTRIGGER:0:10` — variable with 0ms max delay and 10ms cycle time
 - `.superDuperInt` — global variable (must start with `.`)
+
+#### Struct and Array Symbols
+
+Two approaches for reading struct members:
+
+**Option A — Subscribe to individual members (dot notation)**
+
+Use dot notation to address any nested field directly. No `loadSymbols` needed. The PLC resolves each path via a single `0xF009` roundtrip on connect and returns the primitive type.
+
+```yaml
+symbols:
+  - "MAIN.MachineStatus.Motor1.fSpeed"      # → LREAL primitive
+  - "MAIN.MachineStatus.Pressure.fValue"    # → LREAL primitive
+  - "MAIN.MachineStatus.sMachineName"       # → STRING primitive
+```
+
+Each member gets its own change notification — the PLC only sends data when that specific field changes. Best when you need a subset of fields from a large struct or want independent change detection per field.
+
+**Option B — Subscribe to whole struct (requires `loadSymbols: true`)**
+
+Set `loadSymbols: true` to download the full symbol and datatype table on connect. The plugin then decodes the entire struct as a nested JSON object on each notification.
+
+```yaml
+loadSymbols: true
+symbols:
+  - "MAIN.MachineStatus"   # → decoded as nested JSON object
+```
+
+The notification fires when any field in the struct changes. Output value is a JSON object with all fields, e.g.:
+
+```json
+{
+  "Motor1": {"fSpeed": 1087.0, "fTorque": 108.7, "bEnabled": true},
+  "Pressure": {"fValue": 7.0, "sUnit": "bar"},
+  "sMachineName": "Line1"
+}
+```
+
+Use this when you need all fields of a struct or the field names are not known in advance. `loadSymbols` downloads the entire symbol table, which may cause a brief real-time jitter on the PLC during the initial connection — use with care on large programs.
 
 #### Transmission Modes
 

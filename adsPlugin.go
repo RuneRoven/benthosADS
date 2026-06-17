@@ -202,6 +202,8 @@ type adsCommInput struct {
 	dataSizes   map[string]uint32
 	symbolNames map[string]string // strings.ToLower(name) → configured casing (TC2 returns uppercase)
 
+	loadSymbols bool
+
 	// Route registration settings
 	routeUsername    string
 	routePassword    string
@@ -230,6 +232,7 @@ var adsConf = service.NewConfigSpec().
 	Field(service.NewStringField("routeUsername").Description("Username for UDP route registration on the PLC. If set with routePassword, a route will be registered before connecting.").Default("")).
 	Field(service.NewStringField("routePassword").Description("Password for UDP route registration on the PLC.").Default("")).
 	Field(service.NewStringField("routeHostAddress").Description("The address the PLC should use to reach this client. Auto-detected from outbound connection if empty.").Default("")).
+	Field(service.NewBoolField("loadSymbols").Description("Download the full symbol and datatype table from the PLC on connect. Required for struct and array symbols. May cause a brief real-time jitter on the PLC; use with care on large programs.").Default(false)).
 	Field(service.NewStringListField("symbols").Description("Symbols to read. Format: 'MAIN.var' or 'MAIN.var:maxDelayMs:cycleTimeMs'. " +
 		"Examples: 'MAIN.counter', '.globalCounter', 'MAIN.var:50:100'"))
 
@@ -357,6 +360,11 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		return nil, err
 	}
 
+	loadSymbols, err := conf.FieldBool("loadSymbols")
+	if err != nil {
+		return nil, err
+	}
+
 	// Derive hostAMS from routeHostAddress when set to "auto",
 	// matching the same convenience shortcut as the integrated plugin.
 	if hostAMS == "auto" && routeHostAddress != "" {
@@ -381,6 +389,7 @@ func newAdsCommInput(conf *service.ParsedConfig, mgr *service.Resources) (servic
 		notificationChan: make(chan *adsLib.Update, 256),
 		done:             make(chan struct{}),
 		transmissionMode: transmissionMode,
+		loadSymbols:      loadSymbols,
 		routeUsername:    routeUsername,
 		routePassword:    routePassword,
 		routeHostAddress: routeHostAddress,
@@ -498,6 +507,15 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 		g.symbolNames[strings.ToLower(sym.name)] = sym.name
 	}
 
+	if g.loadSymbols {
+		g.log.Infof("Loading symbol and datatype table from PLC (loadSymbols=true)")
+		if err = g.handler.LoadSymbols(ctx); err != nil {
+			g.log.Errorf("LoadSymbols failed: %v", err)
+			return err
+		}
+		g.log.Infof("Symbol table loaded")
+	}
+
 	if g.readType == "notification" {
 		configs := make([]adsLib.NotificationConfig, len(g.symbols))
 		for i, symbol := range g.symbols {
@@ -530,6 +548,18 @@ func (g *adsCommInput) Connect(ctx context.Context) error {
 			return fmt.Errorf("no symbols registered for notifications (%d symbols all failed to resolve)", len(configs))
 		}
 		g.log.Infof("Registered %d/%d notification symbols", registered, len(configs))
+
+		// Populate metadata cache — symbols are in go-ads cache after AddSymbolNotifications.
+		for _, sym := range g.symbols {
+			key := strings.ToLower(sym.name)
+			if view, viewErr := g.handler.GetSymbol(ctx, sym.name); viewErr == nil {
+				g.dataTypes[key] = view.DataType
+				g.dataSizes[key] = view.Length
+				if bt := view.BaseTypeName(); bt != "" {
+					g.baseTypes[key] = bt
+				}
+			}
+		}
 
 		// Wait for initial sample from each registered symbol. TwinCAT sends an
 		// immediate sample on subscribe, so this completes quickly and ensures the
